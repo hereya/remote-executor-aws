@@ -1,7 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import * as ssm from 'aws-cdk-lib/aws-ssm';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 
 export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
@@ -40,12 +40,10 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       ],
     });
 
-    // Store executor token in SSM Parameter Store as SecureString
-    const tokenParamName = `/hereya/executor/${workspace}/token`;
-    new ssm.CfnParameter(this, 'ExecutorTokenParam', {
-      name: tokenParamName,
-      type: 'SecureString',
-      value: executorToken,
+    // Store executor token in Secrets Manager
+    const tokenSecret = new secretsmanager.Secret(this, 'ExecutorTokenSecret', {
+      secretName: `/hereya/executor/${workspace}/token`,
+      secretStringValue: cdk.SecretValue.unsafePlainText(executorToken),
     });
 
     // UserData script
@@ -82,8 +80,8 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       'IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")',
       'EC2_REGION=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/placement/region)',
 
-      // Read executor token from SSM Parameter Store
-      `EXECUTOR_TOKEN=$(aws ssm get-parameter --name "${tokenParamName}" --with-decryption --region $EC2_REGION --query 'Parameter.Value' --output text)`,
+      // Read executor token from Secrets Manager
+      `EXECUTOR_TOKEN=$(aws secretsmanager get-secret-value --secret-id "${tokenSecret.secretName}" --region $EC2_REGION --query 'SecretString' --output text)`,
 
       // Create systemd service for hereya executor
       `cat > /etc/systemd/system/hereya-executor.service << SERVICEEOF`,
