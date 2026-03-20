@@ -69,8 +69,8 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       'tofu --version',
       'cdk --version',
 
-      // Authenticate hereya CLI
-      `npx hereya login --token ${executorToken}`,
+      // Disable tracing to avoid leaking token in logs
+      'set +x',
 
       // Create systemd service for hereya executor
       `cat > /etc/systemd/system/hereya-executor.service << 'EOF'`,
@@ -85,6 +85,7 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       `Environment=HEREYA_TOKEN=${executorToken}`,
       `Environment=HEREYA_CLOUD_URL=${hereyaCloudUrl}`,
       'Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+      `ExecStartPre=/usr/bin/npx hereya login --token ${executorToken}`,
       `ExecStart=/usr/bin/npx hereya executor start -w ${workspace}`,
       'Restart=always',
       'RestartSec=10',
@@ -95,6 +96,12 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       '[Install]',
       'WantedBy=multi-user.target',
       'EOF',
+
+      // Restrict service file permissions (contains token)
+      'chmod 600 /etc/systemd/system/hereya-executor.service',
+
+      // Re-enable tracing
+      'set -x',
 
       // Enable and start the service
       'systemctl daemon-reload',
