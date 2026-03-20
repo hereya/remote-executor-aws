@@ -69,11 +69,15 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       'tofu --version',
       'cdk --version',
 
+      // Get region from instance metadata
+      'TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")',
+      'EC2_REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region)',
+
       // Disable tracing to avoid leaking token in logs
       'set +x',
 
       // Create systemd service for hereya executor
-      `cat > /etc/systemd/system/hereya-executor.service << 'EOF'`,
+      `cat > /etc/systemd/system/hereya-executor.service << SERVICEEOF`,
       '[Unit]',
       'Description=Hereya Remote Executor',
       'After=network-online.target',
@@ -84,6 +88,8 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       'User=ec2-user',
       `Environment=HEREYA_TOKEN=${executorToken}`,
       `Environment=HEREYA_CLOUD_URL=${hereyaCloudUrl}`,
+      'Environment=AWS_REGION=$EC2_REGION',
+      'Environment=AWS_DEFAULT_REGION=$EC2_REGION',
       'Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
       `ExecStartPre=/usr/bin/npx hereya login --token ${executorToken}`,
       `ExecStart=/usr/bin/npx hereya executor start -w ${workspace}`,
@@ -95,7 +101,7 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       '',
       '[Install]',
       'WantedBy=multi-user.target',
-      'EOF',
+      'SERVICEEOF',
 
       // Restrict service file permissions (contains token)
       'chmod 600 /etc/systemd/system/hereya-executor.service',
