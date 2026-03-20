@@ -1,6 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 
 export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
@@ -39,6 +40,14 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       ],
     });
 
+    // Store executor token in SSM Parameter Store as SecureString
+    const tokenParamName = `/hereya/executor/${workspace}/token`;
+    new ssm.CfnParameter(this, 'ExecutorTokenParam', {
+      name: tokenParamName,
+      type: 'SecureString',
+      value: executorToken,
+    });
+
     // UserData script
     const userData = ec2.UserData.forLinux();
     userData.addCommands(
@@ -70,11 +79,11 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       'cdk --version',
 
       // Get region from instance metadata
-      'TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")',
-      'EC2_REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region)',
+      'IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")',
+      'EC2_REGION=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/placement/region)',
 
-      // Disable tracing to avoid leaking token in logs
-      'set +x',
+      // Read executor token from SSM Parameter Store
+      `EXECUTOR_TOKEN=$(aws ssm get-parameter --name "${tokenParamName}" --with-decryption --region $EC2_REGION --query 'Parameter.Value' --output text)`,
 
       // Create systemd service for hereya executor
       `cat > /etc/systemd/system/hereya-executor.service << SERVICEEOF`,
@@ -86,12 +95,12 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       '[Service]',
       'Type=simple',
       'User=ec2-user',
-      `Environment=HEREYA_TOKEN=${executorToken}`,
+      'Environment=HEREYA_TOKEN=$EXECUTOR_TOKEN',
       `Environment=HEREYA_CLOUD_URL=${hereyaCloudUrl}`,
       'Environment=AWS_REGION=$EC2_REGION',
       'Environment=AWS_DEFAULT_REGION=$EC2_REGION',
       'Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-      `ExecStartPre=/usr/bin/npx hereya login --token ${executorToken}`,
+      'ExecStartPre=/usr/bin/npx hereya login --token $EXECUTOR_TOKEN',
       `ExecStart=/usr/bin/npx hereya executor start -w ${workspace}`,
       'Restart=always',
       'RestartSec=10',
@@ -105,9 +114,6 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
 
       // Restrict service file permissions (contains token)
       'chmod 600 /etc/systemd/system/hereya-executor.service',
-
-      // Re-enable tracing
-      'set -x',
 
       // Enable and start the service
       'systemctl daemon-reload',
