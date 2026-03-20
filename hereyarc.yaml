@@ -1,0 +1,6 @@
+name: hereya/remote-executor-aws
+version: 0.1.0
+description: "Deploy a remote executor on AWS EC2 for a hereya workspace"
+visibility: public
+iac: cdk
+infra: aws

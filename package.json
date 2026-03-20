@@ -1,0 +1,21 @@
+{
+  "name": "hereya-remote-executor-aws",
+  "version": "0.1.0",
+  "bin": {
+    "hereya-remote-executor-aws": "bin/hereya-remote-executor-aws.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "cdk": "cdk"
+  },
+  "devDependencies": {
+    "@types/node": "22.7.9",
+    "aws-cdk": "2.176.0",
+    "ts-node": "^10.9.2",
+    "typescript": "~5.6.3"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.176.0",
+    "constructs": "^10.0.0"
+  }
+}
