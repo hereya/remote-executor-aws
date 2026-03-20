@@ -49,20 +49,30 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
     userData.addCommands(
       'set -ex',
 
-      // Install Node.js 22
-      'dnf install -y nodejs22 npm git',
+      // Log all output for debugging
+      'exec > >(tee /var/log/hereya-userdata.log) 2>&1',
+
+      // Install Node.js 22 via NodeSource
+      'curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -',
+      'dnf install -y nodejs git',
 
       // Install OpenTofu
-      'curl -fsSL https://get.opentofu.org/install-opentofu.sh -o install-opentofu.sh',
-      'chmod +x install-opentofu.sh',
-      './install-opentofu.sh --install-method rpm',
-      'rm -f install-opentofu.sh',
+      'curl -fsSL https://get.opentofu.org/install-opentofu.sh -o /tmp/install-opentofu.sh',
+      'chmod +x /tmp/install-opentofu.sh',
+      '/tmp/install-opentofu.sh --install-method rpm',
+      'rm -f /tmp/install-opentofu.sh',
 
       // Install AWS CDK globally
       'npm install -g aws-cdk',
 
       // Install hereya-cli globally
       'npm install -g hereya-cli',
+
+      // Verify all installations
+      'node --version',
+      'npm --version',
+      'tofu --version',
+      'cdk --version',
 
       // Create systemd service for hereya executor
       `cat > /etc/systemd/system/hereya-executor.service << 'EOF'`,
@@ -76,9 +86,13 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       'User=ec2-user',
       `Environment=HEREYA_TOKEN=${executorToken}`,
       `Environment=HEREYA_CLOUD_URL=${hereyaCloudUrl}`,
+      'Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
       `ExecStart=/usr/bin/npx hereya executor start -w ${workspace}`,
       'Restart=always',
       'RestartSec=10',
+      'StandardOutput=journal',
+      'StandardError=journal',
+      'SyslogIdentifier=hereya-executor',
       '',
       '[Install]',
       'WantedBy=multi-user.target',
