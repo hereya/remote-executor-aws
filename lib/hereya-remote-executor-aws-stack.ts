@@ -69,6 +69,9 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       'tofu --version',
       'cdk --version',
 
+      // Authenticate hereya CLI
+      `npx hereya login --token ${executorToken}`,
+
       // Create systemd service for hereya executor
       `cat > /etc/systemd/system/hereya-executor.service << 'EOF'`,
       '[Unit]',
