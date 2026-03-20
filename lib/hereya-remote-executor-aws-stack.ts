@@ -11,10 +11,7 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
     // EXECUTOR_TOKEN uses a placeholder default to allow `cdk destroy` without env vars
     const executorToken = process.env['EXECUTOR_TOKEN'] || 'placeholder';
 
-    const workspace = process.env['WORKSPACE'];
-    if (!workspace) {
-      throw new Error('WORKSPACE environment variable is required');
-    }
+    const workspace = process.env['WORKSPACE'] || 'placeholder';
 
     // Optional parameters
     const hereyaCloudUrl = process.env['HEREYA_CLOUD_URL'] || 'https://cloud.hereya.dev';
