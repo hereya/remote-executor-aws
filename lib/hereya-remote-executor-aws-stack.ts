@@ -114,6 +114,14 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       // Restrict service file permissions (contains token)
       'chmod 600 /etc/systemd/system/hereya-executor.service',
 
+      // Daily cleanup of stale Terraform provider caches and temp files
+      "cat > /etc/cron.daily/hereya-cleanup << 'CLEANUPEOF'",
+      '#!/bin/bash',
+      'find /tmp -name "terraform-provider*" -mtime +2 -delete 2>/dev/null',
+      'find /home/ec2-user/.hereya -name ".terraform" -type d -mtime +7 -exec rm -rf {} + 2>/dev/null',
+      'CLEANUPEOF',
+      'chmod +x /etc/cron.daily/hereya-cleanup',
+
       // Enable and start the service
       'systemctl daemon-reload',
       'systemctl enable hereya-executor',
@@ -134,6 +142,14 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       role,
       userData,
       vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
+      blockDevices: [
+        {
+          deviceName: '/dev/xvda',
+          volume: ec2.BlockDeviceVolume.ebs(30, {
+            volumeType: ec2.EbsDeviceVolumeType.GP3,
+          }),
+        },
+      ],
     });
 
     // Outputs
