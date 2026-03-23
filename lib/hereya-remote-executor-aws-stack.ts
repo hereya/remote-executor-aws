@@ -99,6 +99,8 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       'Environment=AWS_DEFAULT_REGION=$EC2_REGION',
       'Environment=HOME=/home/ec2-user',
       'Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+      'Environment=HEREYA_SKIP_TERRAFORM_DOWNLOAD=true',
+      'Environment=HEREYA_TERRAFORM_BIN_PATH=tofu',
       'ExecStartPre=/usr/bin/npx hereya login --token $EXECUTOR_TOKEN',
       `ExecStart=/usr/bin/npx hereya executor start -w ${workspace}`,
       'Restart=always',
