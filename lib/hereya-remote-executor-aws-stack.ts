@@ -16,7 +16,7 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
 
     // Optional parameters
     const hereyaCloudUrl = process.env['HEREYA_CLOUD_URL'] || 'https://cloud.hereya.dev';
-    const instanceType = process.env['instanceType'] || 't3.small';
+    const instanceType = process.env['instanceType'] || 't3.medium';
     const vpcId: string | undefined = process.env['vpcId'];
 
     // VPC
