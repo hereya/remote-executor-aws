@@ -1,4 +1,5 @@
 import * as cdk from 'aws-cdk-lib';
+import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
@@ -18,6 +19,7 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
     const hereyaCloudUrl = process.env['HEREYA_CLOUD_URL'] || 'https://cloud.hereya.dev';
     const instanceType = process.env['instanceType'] || 't3.medium';
     const vpcId: string | undefined = process.env['vpcId'];
+    const instanceCount = parseInt(process.env['instanceCount'] || '1', 10);
 
     // VPC
     const vpc = vpcId
@@ -132,8 +134,8 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
 
     const [instClass, instSize] = instanceType.split('.');
 
-    // EC2 instance
-    const instance = new ec2.Instance(this, 'ExecutorInstance', {
+    // Auto Scaling Group
+    const asg = new autoscaling.AutoScalingGroup(this, 'ExecutorASG', {
       vpc,
       instanceType: ec2.InstanceType.of(
         instClass as ec2.InstanceClass,
@@ -144,20 +146,27 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       role,
       userData,
       vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
+      minCapacity: instanceCount,
+      maxCapacity: instanceCount,
+      desiredCapacity: instanceCount,
       blockDevices: [
         {
           deviceName: '/dev/xvda',
-          volume: ec2.BlockDeviceVolume.ebs(30, {
-            volumeType: ec2.EbsDeviceVolumeType.GP3,
+          volume: autoscaling.BlockDeviceVolume.ebs(30, {
+            volumeType: autoscaling.EbsDeviceVolumeType.GP3,
           }),
         },
       ],
+      updatePolicy: autoscaling.UpdatePolicy.rollingUpdate({
+        maxBatchSize: 1,
+        minInstancesInService: Math.max(0, instanceCount - 1),
+      }),
     });
 
     // Outputs
-    new cdk.CfnOutput(this, 'executorInstanceId', {
-      value: instance.instanceId,
-      description: 'EC2 instance ID of the remote executor',
+    new cdk.CfnOutput(this, 'executorAsgName', {
+      value: asg.autoScalingGroupName,
+      description: 'Auto Scaling Group name of the remote executor',
     });
 
     new cdk.CfnOutput(this, 'executorSecurityGroupId', {
