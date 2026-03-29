@@ -58,7 +58,7 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
 
       // Install Node.js 22 via NodeSource
       'curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -',
-      'dnf install -y nodejs git',
+      'dnf install -y nodejs git cronie',
 
       // Install OpenTofu
       'curl -fsSL https://get.opentofu.org/install-opentofu.sh -o /tmp/install-opentofu.sh',
