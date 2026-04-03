@@ -191,8 +191,10 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       'echo "17 * * * * root /opt/hereya/update-hereya.sh" > /etc/cron.d/hereya-update',
       'chmod 644 /etc/cron.d/hereya-update',
 
-      // Enable and start the service
+      // Enable and start crond (for update cron) and executor service
       'systemctl daemon-reload',
+      'systemctl enable crond',
+      'systemctl start crond',
       'systemctl enable hereya-executor',
       'systemctl start hereya-executor',
     );
