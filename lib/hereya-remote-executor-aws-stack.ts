@@ -13,7 +13,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 
-const BROKER_VERSION = '0.7.2';
+const BROKER_VERSION = '0.7.3';
 
 export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -150,7 +150,12 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       // single-quotes) allows ${LOG_GROUP_NAME} to be expanded by the shell.
       'cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << CWAEOF',
       '{',
+      '  "agent": {',
+      '    "metrics_collection_interval": 60,',
+      '    "logfile": "/var/log/amazon-cloudwatch-agent.log"',
+      '  },',
       '  "logs": {',
+      '    "force_flush_interval": 1,',
       '    "logs_collected": {',
       '      "files": {',
       '        "collect_list": [',
@@ -170,6 +175,12 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       '            "file_path": "/var/log/cloud-init-output.log",',
       '            "log_group_name": "${LOG_GROUP_NAME}",',
       '            "log_stream_name": "{instance_id}/cloud-init",',
+      '            "timezone": "UTC"',
+      '          },',
+      '          {',
+      '            "file_path": "/var/log/messages",',
+      '            "log_group_name": "${LOG_GROUP_NAME}",',
+      '            "log_stream_name": "{instance_id}/syslog",',
       '            "timezone": "UTC"',
       '          }',
       '        ]',
@@ -268,6 +279,12 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
             '#!/bin/bash',
             'set +e',
             'logger -t hereya-drain "drain start"',
+            '# Give the CloudWatch agent time to flush any pending log buffers',
+            '# (executor crash logs especially) before we terminate the host. The',
+            '# agent default flush interval is up to 5s and the upload itself takes',
+            '# a few seconds — without this delay we lose the post-mortem.',
+            'logger -t hereya-drain "pre-drain flush window: 30s"',
+            'sleep 30',
             'TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")',
             'INSTANCE_ID=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)',
             'REGION=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region)',
@@ -279,8 +296,8 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
             'logger -t hereya-drain "terminate-instance-in-auto-scaling-group rc=$?"',
             '# Belt-and-braces: halt the OS even if the AWS API call failed.',
             '# ASG will eventually mark this instance unhealthy and replace it.',
-            'logger -t hereya-drain "scheduling shutdown -h now in 5s"',
-            'sleep 5',
+            'logger -t hereya-drain "scheduling shutdown -h now in 10s (final flush window)"',
+            'sleep 10',
             '/sbin/shutdown -h now',
             'DRAINEOF',
             'chmod +x /usr/local/bin/hereya-drain-asg.sh',
