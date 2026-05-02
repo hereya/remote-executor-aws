@@ -114,6 +114,11 @@ async function handleResolveEnv(input: {
     return jsonResponse(200, { ok: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    const stack = err instanceof Error ? err.stack : undefined;
+    // Always log so the failure shows up in CloudWatch — patchJobFailed
+    // also writes to the DB but having it in CW logs makes triage faster
+    // (and survives if the PATCH itself errors).
+    console.error("broker.resolve-env.error", { jobId: input.jobId, message, stack });
     await patchJobFailed(input.jobId, message, input.token);
     return jsonResponse(500, { error: message });
   }

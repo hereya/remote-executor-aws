@@ -13,7 +13,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 
-const BROKER_VERSION = '0.7.4';
+const BROKER_VERSION = '0.7.5';
 
 export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
