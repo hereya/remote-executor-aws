@@ -131,7 +131,7 @@ describe('HereyaRemoteExecutorAwsStack — ephemeral mode', () => {
     });
   });
 
-  it('provisions the broker Lambda with reserved concurrency + Function URL (AWS_IAM)', () => {
+  it('provisions the broker Lambda with reserved concurrency + Function URL (NONE auth)', () => {
     const t = synthesise({
       mode: 'ephemeral',
       WORKSPACE: 'test',
@@ -155,7 +155,8 @@ describe('HereyaRemoteExecutorAwsStack — ephemeral mode', () => {
         }),
       },
     });
-    t.hasResourceProperties('AWS::Lambda::Url', { AuthType: 'AWS_IAM' });
+    // AuthType=NONE — auth is the KMS-signed JWT verified inside the handler.
+    t.hasResourceProperties('AWS::Lambda::Url', { AuthType: 'NONE' });
   });
 
   it('provisions the BrokerJtiCache table with TTL', () => {
@@ -173,7 +174,7 @@ describe('HereyaRemoteExecutorAwsStack — ephemeral mode', () => {
     });
   });
 
-  it('provisions an OIDC identity provider for hereya-cloud', () => {
+  it('does NOT provision OIDC provider or BrokerInvoker role (auth=NONE)', () => {
     const t = synthesise({
       mode: 'ephemeral',
       WORKSPACE: 'test',
@@ -181,42 +182,15 @@ describe('HereyaRemoteExecutorAwsStack — ephemeral mode', () => {
       EXECUTOR_TOKEN: 'tkn',
       HEREYA_CLOUD_URL: 'https://cloud.hereya.dev',
     });
-    t.hasResourceProperties(
-      'Custom::AWSCDKOpenIdConnectProvider',
-      Match.objectLike({
-        ClientIDList: ['sts.amazonaws.com'],
-        Url: 'https://cloud.hereya.dev',
-      }),
-    );
-  });
-
-  it('provisions the invoker role with sub/aud trust conditions', () => {
-    const t = synthesise({
-      mode: 'ephemeral',
-      WORKSPACE: 'test',
-      workspaceId: 'ws-1',
-      EXECUTOR_TOKEN: 'tkn',
-      HEREYA_CLOUD_URL: 'https://cloud.hereya.dev',
-    });
-    t.hasResourceProperties(
-      'AWS::IAM::Role',
-      Match.objectLike({
-        RoleName: 'HereyaBrokerInvoker-ws-1',
-        AssumeRolePolicyDocument: Match.objectLike({
-          Statement: Match.arrayWith([
-            Match.objectLike({
-              Action: 'sts:AssumeRoleWithWebIdentity',
-              Condition: Match.objectLike({
-                StringEquals: Match.objectLike({
-                  'cloud.hereya.dev:sub': 'workspace:ws-1',
-                  'cloud.hereya.dev:aud': 'sts.amazonaws.com',
-                }),
-              }),
-            }),
-          ]),
-        }),
-      }),
-    );
+    t.resourceCountIs('Custom::AWSCDKOpenIdConnectProvider', 0);
+    // No HereyaBrokerInvoker role exists either. Other IAM::Role resources
+    // (executor instance role, Lambda execution role) may still be present.
+    expect(() =>
+      t.hasResourceProperties(
+        'AWS::IAM::Role',
+        Match.objectLike({ RoleName: 'HereyaBrokerInvoker-ws-1' }),
+      ),
+    ).toThrow();
   });
 
   it('emits all the install-time outputs', () => {
@@ -233,8 +207,9 @@ describe('HereyaRemoteExecutorAwsStack — ephemeral mode', () => {
     t.hasOutput('brokerVersion', {});
     t.hasOutput('awsAccountId', {});
     t.hasOutput('region', {});
-    t.hasOutput('invokerRoleArn', {});
     t.hasOutput('brokerLambdaArn', {});
+    // invokerRoleArn intentionally absent — see "does NOT provision OIDC ..."
+    expect(() => t.hasOutput('invokerRoleArn', {})).toThrow();
   });
 
   it('throws when workspaceId is missing in ephemeral mode', () => {

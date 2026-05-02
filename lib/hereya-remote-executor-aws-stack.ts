@@ -9,7 +9,7 @@ import * as nodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 
-const BROKER_VERSION = '0.6.4';
+const BROKER_VERSION = '0.6.5';
 
 export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -356,15 +356,19 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
     }
 
     // -----------------------------------------------------------------
-    // Ephemeral mode additions: OIDC + invoker role + jti table + broker Lambda
+    // Ephemeral mode additions: jti table + broker Lambda
     // -----------------------------------------------------------------
-
-    // OIDC identity provider — trust anchor for hereya-cloud federation.
-    const oidcProvider = new iam.OpenIdConnectProvider(this, 'HereyaCloudOidc', {
-      url: hereyaCloudUrl,
-      clientIds: ['sts.amazonaws.com'],
-    });
-    const oidcHost = hereyaCloudUrl.replace(/^https?:\/\//, '');
+    //
+    // Originally this branch also provisioned an OIDC identity provider and
+    // an IAM role (HereyaBrokerInvoker-<workspaceId>) so hereya-cloud could
+    // SigV4-sign requests via AssumeRoleWithWebIdentity, with the Function URL
+    // gated by AuthType=AWS_IAM. In practice AWS rejected those signed
+    // requests with 403 even when the resource policy explicitly allowed the
+    // role ARN. The cause was never pinned down (long debug session). The
+    // KMS-signed JWT in `X-Hereya-Broker-Token` is the real authentication —
+    // it's RS256-signed by hereya-cloud's KMS key, body-bound (`bh` claim),
+    // jti-deduped, and 60s-expiring. Reverted to AuthType=NONE so the Lambda
+    // sees and verifies the JWT.
 
     // DynamoDB jti replay cache — TTL on `expiresAt`.
     const jtiCacheTable = new dynamodb.Table(this, 'BrokerJtiCache', {
@@ -455,50 +459,12 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
 
     jtiCacheTable.grantReadWriteData(brokerLambda);
 
-    // Function URL with AWS_IAM auth — only the invoker role can call.
+    // Function URL with AuthType=NONE — the URL is unguessable AND the Lambda
+    // verifies a KMS-signed JWT in `X-Hereya-Broker-Token` before doing any
+    // work. Reserved concurrency + JWT verification + jti dedup limit DoS
+    // exposure if the URL leaks.
     const fnUrl = brokerLambda.addFunctionUrl({
-      authType: lambda.FunctionUrlAuthType.AWS_IAM,
-    });
-
-    // IAM invoker role — assumed by hereya-cloud via web-identity federation.
-    const invokerRoleName = `HereyaBrokerInvoker-${workspaceId}`;
-
-    const invokerRole = new iam.Role(this, 'BrokerInvokerRole', {
-      roleName: invokerRoleName,
-      assumedBy: new iam.FederatedPrincipal(
-        oidcProvider.openIdConnectProviderArn,
-        {
-          StringEquals: {
-            [`${oidcHost}:sub`]: `workspace:${workspaceId}`,
-            [`${oidcHost}:aud`]: 'sts.amazonaws.com',
-          },
-        },
-        'sts:AssumeRoleWithWebIdentity',
-      ),
-    });
-
-    invokerRole.addToPolicy(
-      new iam.PolicyStatement({
-        actions: ['lambda:InvokeFunctionUrl'],
-        resources: [brokerLambda.functionArn],
-      }),
-    );
-
-    // Function URLs with AuthType=AWS_IAM evaluate BOTH the caller's identity
-    // policy (above) AND the Lambda's resource-based policy. Without the
-    // resource-side grant, signed requests are rejected with 403 at the AWS
-    // edge, the Lambda is never invoked, and only Url4xxCount ticks up — no
-    // CloudWatch invocation log is produced.
-    //
-    // NOTE: `lambda.Function.grantInvokeUrl()` only adds the identity-side
-    // policy (no AWS::Lambda::Permission emitted) — verified via `cdk synth`.
-    // The resource-side grant requires `addPermission` with
-    // `functionUrlAuthType` set, which is what `FunctionUrl.grantInvokeUrl()`
-    // does internally.
-    brokerLambda.addPermission('BrokerInvokerUrlPermission', {
-      principal: invokerRole,
-      action: 'lambda:InvokeFunctionUrl',
-      functionUrlAuthType: lambda.FunctionUrlAuthType.AWS_IAM,
+      authType: lambda.FunctionUrlAuthType.NONE,
     });
 
     // Ephemeral-mode CFN outputs
@@ -506,7 +472,6 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'brokerVersion', { value: BROKER_VERSION });
     new cdk.CfnOutput(this, 'awsAccountId', { value: cdk.Aws.ACCOUNT_ID });
     new cdk.CfnOutput(this, 'region', { value: cdk.Aws.REGION });
-    new cdk.CfnOutput(this, 'invokerRoleArn', { value: invokerRole.roleArn });
     new cdk.CfnOutput(this, 'brokerLambdaArn', { value: brokerLambda.functionArn });
   }
 }
