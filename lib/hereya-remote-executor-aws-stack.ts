@@ -9,7 +9,7 @@ import * as nodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 
-const BROKER_VERSION = '0.6.3';
+const BROKER_VERSION = '0.6.4';
 
 export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -488,9 +488,18 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
     // policy (above) AND the Lambda's resource-based policy. Without the
     // resource-side grant, signed requests are rejected with 403 at the AWS
     // edge, the Lambda is never invoked, and only Url4xxCount ticks up — no
-    // CloudWatch invocation log is produced. Adding grantInvokeUrl() emits the
-    // missing AWS::Lambda::Permission for the invoker role.
-    brokerLambda.grantInvokeUrl(invokerRole);
+    // CloudWatch invocation log is produced.
+    //
+    // NOTE: `lambda.Function.grantInvokeUrl()` only adds the identity-side
+    // policy (no AWS::Lambda::Permission emitted) — verified via `cdk synth`.
+    // The resource-side grant requires `addPermission` with
+    // `functionUrlAuthType` set, which is what `FunctionUrl.grantInvokeUrl()`
+    // does internally.
+    brokerLambda.addPermission('BrokerInvokerUrlPermission', {
+      principal: invokerRole,
+      action: 'lambda:InvokeFunctionUrl',
+      functionUrlAuthType: lambda.FunctionUrlAuthType.AWS_IAM,
+    });
 
     // Ephemeral-mode CFN outputs
     new cdk.CfnOutput(this, 'brokerWebhookUrl', { value: fnUrl.url });
