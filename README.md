@@ -19,6 +19,28 @@ Deploy a remote executor on AWS EC2 for a hereya workspace. Two operating modes:
 | `workspaceId` | yes if `mode=ephemeral` | — | Workspace ID. Used in the OIDC trust-policy `sub` condition and the invoker role name. |
 | `brokerConcurrency` | no | `50` | Reserved Lambda concurrency for the broker (ephemeral only). |
 | `idleTimeoutSeconds` | no | `600` | Executor idle-shutdown timeout in seconds (ephemeral only). |
+| `useSpot` | no | `true` | Use Spot instances for the executor ASG (~70% cheaper). See "Spot vs On-Demand" below. |
+
+## Spot vs On-Demand
+
+By default the executor ASG runs on Spot instances (~70% cheaper). AWS may
+reclaim a Spot EC2 with 2 minutes' notice; interrupted jobs auto-retry
+via hereya-cloud's heartbeat reaper (terraform/CDK state lives in S3+DynamoDB,
+applies are idempotent, so the next executor resumes cleanly).
+
+When `useSpot=true` (the default), the ASG uses a `MixedInstancesPolicy` with
+`onDemandPercentageAboveBaseCapacity=0`, `SpotAllocationStrategy=PRICE_CAPACITY_OPTIMIZED`,
+and a small set of equivalent instance types (e.g. `t3.medium` + `t3a.medium`)
+to diversify Spot capacity pools and reduce interruption frequency.
+
+To opt out (use on-demand):
+
+```
+hereya workspace executor install -w <ws> --parameter useSpot=false
+```
+
+The `executorPurchaseOption` CFN output (`spot` or `on-demand`) reports the
+deployed mode.
 
 ## Ephemeral mode
 

@@ -1,5 +1,5 @@
 name: hereya/remote-executor-aws
-version: 0.7.5
+version: 0.7.6
 description: "Deploy a remote executor on AWS EC2 for a hereya workspace (always-on or ephemeral scale-to-zero)"
 visibility: public
 iac: cdk
@@ -21,3 +21,7 @@ parameters:
     description: "Executor idle-shutdown timeout in seconds. Default 600. Only used when mode=ephemeral."
     mandatory: false
     default: "600"
+  useSpot:
+    description: "Use Spot instances for the executor ASG. Saves ~70% but EC2 may be reclaimed with 2-min warning. Interrupted jobs auto-retry via the existing heartbeat reaper. Default true."
+    mandatory: false
+    default: "true"

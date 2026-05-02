@@ -13,18 +13,31 @@ function clearEnv(): void {
   delete process.env.instanceType;
   delete process.env.instanceCount;
   delete process.env.vpcId;
+  delete process.env.useSpot;
 }
 
-// Render the ASG LaunchConfiguration's UserData (Fn::Base64-wrapped Fn::Join)
-// into a single inspectable string. Any Ref/Fn within the join gets replaced
-// with a sentinel so substring assertions still work.
+// Render the ASG's UserData (Fn::Base64-wrapped Fn::Join) into a single
+// inspectable string. Any Ref/Fn within the join gets replaced with a sentinel
+// so substring assertions still work. Looks at LaunchConfiguration (on-demand
+// path) OR LaunchTemplate (Spot path — UserData lives in LaunchTemplateData).
 function getUserDataString(template: Template): string {
   const lcs = template.findResources('AWS::AutoScaling::LaunchConfiguration');
   const lcKeys = Object.keys(lcs);
-  if (lcKeys.length !== 1) {
+  let ud: any;
+  if (lcKeys.length === 1) {
+    ud = lcs[lcKeys[0]].Properties.UserData;
+  } else if (lcKeys.length === 0) {
+    const lts = template.findResources('AWS::EC2::LaunchTemplate');
+    const ltKeys = Object.keys(lts);
+    if (ltKeys.length !== 1) {
+      throw new Error(
+        `expected exactly 1 LaunchConfiguration or LaunchTemplate, got ${lcKeys.length} LC / ${ltKeys.length} LT`,
+      );
+    }
+    ud = lts[ltKeys[0]].Properties.LaunchTemplateData.UserData;
+  } else {
     throw new Error(`expected exactly 1 LaunchConfiguration, got ${lcKeys.length}`);
   }
-  const ud = lcs[lcKeys[0]].Properties.UserData;
   // UserData is { 'Fn::Base64': { 'Fn::Join': ['', [...parts]] } } or
   // { 'Fn::Base64': '<plain string>' }.
   const inner = ud['Fn::Base64'];
@@ -97,11 +110,12 @@ describe('HereyaRemoteExecutorAwsStack — always-on mode (default)', () => {
     t.resourceCountIs('Custom::AWSCDKOpenIdConnectProvider', 0);
   });
 
-  it('emits the always-on outputs (incl. executorLogGroupName)', () => {
+  it('emits the always-on outputs (incl. executorLogGroupName + executorPurchaseOption)', () => {
     const t = synthesise({ WORKSPACE: 'test', EXECUTOR_TOKEN: 'tkn' });
     t.hasOutput('executorAsgName', {});
     t.hasOutput('executorSecurityGroupId', {});
     t.hasOutput('executorLogGroupName', {});
+    t.hasOutput('executorPurchaseOption', { Value: 'spot' });
     expect(() => t.hasOutput('brokerWebhookUrl', {})).toThrow();
     expect(() => t.hasOutput('invokerRoleArn', {})).toThrow();
   });
@@ -256,6 +270,7 @@ describe('HereyaRemoteExecutorAwsStack — ephemeral mode', () => {
     t.hasOutput('executorAsgName', {});
     t.hasOutput('executorSecurityGroupId', {});
     t.hasOutput('executorLogGroupName', {});
+    t.hasOutput('executorPurchaseOption', { Value: 'spot' });
     t.hasOutput('brokerWebhookUrl', {});
     t.hasOutput('brokerVersion', {});
     t.hasOutput('awsAccountId', {});
@@ -332,5 +347,101 @@ describe('HereyaRemoteExecutorAwsStack — ephemeral mode', () => {
     expect(ud).toContain('OnFailure=hereya-drain.service');
     expect(ud).toContain('terminate-instance-in-auto-scaling-group');
     expect(ud).toContain('--should-decrement-desired-capacity');
+  });
+});
+
+describe('HereyaRemoteExecutorAwsStack — Spot purchase mode (default)', () => {
+  it('synth with default params produces ASG with MixedInstancesPolicy (price-capacity-optimized, 0% on-demand)', () => {
+    const t = synthesise({ WORKSPACE: 'test', EXECUTOR_TOKEN: 'tkn' });
+
+    t.hasResourceProperties('AWS::AutoScaling::AutoScalingGroup', {
+      MixedInstancesPolicy: Match.objectLike({
+        InstancesDistribution: Match.objectLike({
+          OnDemandBaseCapacity: 0,
+          OnDemandPercentageAboveBaseCapacity: 0,
+          SpotAllocationStrategy: 'price-capacity-optimized',
+        }),
+        LaunchTemplate: Match.objectLike({
+          Overrides: Match.arrayWith([Match.objectLike({ InstanceType: 't3.medium' })]),
+        }),
+      }),
+    });
+
+    // Spot path uses an EC2 LaunchTemplate, not an inline LaunchConfiguration.
+    t.resourceCountIs('AWS::EC2::LaunchTemplate', 1);
+    t.resourceCountIs('AWS::AutoScaling::LaunchConfiguration', 0);
+
+    // Output reflects the chosen mode.
+    t.hasOutput('executorPurchaseOption', { Value: 'spot' });
+  });
+
+  it('Spot ASG includes a t3a alternate when base instance class is t3', () => {
+    const t = synthesise({ WORKSPACE: 'test', EXECUTOR_TOKEN: 'tkn' });
+    t.hasResourceProperties('AWS::AutoScaling::AutoScalingGroup', {
+      MixedInstancesPolicy: Match.objectLike({
+        LaunchTemplate: Match.objectLike({
+          Overrides: Match.arrayWith([
+            Match.objectLike({ InstanceType: 't3.medium' }),
+            Match.objectLike({ InstanceType: 't3a.medium' }),
+          ]),
+        }),
+      }),
+    });
+  });
+
+  it('synth with useSpot=false falls back to on-demand (LaunchConfiguration, no MixedInstancesPolicy)', () => {
+    const t = synthesise({
+      WORKSPACE: 'test',
+      EXECUTOR_TOKEN: 'tkn',
+      useSpot: 'false',
+    });
+
+    t.resourceCountIs('AWS::AutoScaling::LaunchConfiguration', 1);
+    t.resourceCountIs('AWS::EC2::LaunchTemplate', 0);
+
+    // Assert MixedInstancesPolicy is absent.
+    const asgs = t.findResources('AWS::AutoScaling::AutoScalingGroup');
+    const asgKeys = Object.keys(asgs);
+    expect(asgKeys.length).toBe(1);
+    expect(asgs[asgKeys[0]].Properties.MixedInstancesPolicy).toBeUndefined();
+
+    t.hasOutput('executorPurchaseOption', { Value: 'on-demand' });
+  });
+
+  it('Spot mode works with ephemeral too (MixedInstancesPolicy + min=0/max=1/desired=0)', () => {
+    const t = synthesise({
+      mode: 'ephemeral',
+      WORKSPACE: 'test',
+      workspaceId: 'ws-1',
+      EXECUTOR_TOKEN: 'tkn',
+      HEREYA_CLOUD_URL: 'https://cloud.hereya.dev',
+    });
+
+    t.hasResourceProperties('AWS::AutoScaling::AutoScalingGroup', {
+      MinSize: '0',
+      MaxSize: '1',
+      DesiredCapacity: '0',
+      MixedInstancesPolicy: Match.objectLike({
+        InstancesDistribution: Match.objectLike({
+          OnDemandPercentageAboveBaseCapacity: 0,
+          SpotAllocationStrategy: 'price-capacity-optimized',
+        }),
+      }),
+    });
+    t.hasOutput('executorPurchaseOption', { Value: 'spot' });
+  });
+
+  it('useSpot=false in ephemeral mode also drops MixedInstancesPolicy', () => {
+    const t = synthesise({
+      mode: 'ephemeral',
+      WORKSPACE: 'test',
+      workspaceId: 'ws-1',
+      useSpot: 'false',
+      EXECUTOR_TOKEN: 'tkn',
+      HEREYA_CLOUD_URL: 'https://cloud.hereya.dev',
+    });
+    t.resourceCountIs('AWS::AutoScaling::LaunchConfiguration', 1);
+    t.resourceCountIs('AWS::EC2::LaunchTemplate', 0);
+    t.hasOutput('executorPurchaseOption', { Value: 'on-demand' });
   });
 });

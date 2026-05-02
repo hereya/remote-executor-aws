@@ -13,7 +13,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 
-const BROKER_VERSION = '0.7.5';
+const BROKER_VERSION = '0.7.6';
 
 export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -39,6 +39,11 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
     }
 
     const isEphemeral = mode === 'ephemeral';
+
+    // Spot vs on-demand. Default true: the executor model is interruption-
+    // tolerant (terraform/CDK state lives in S3+DynamoDB, the heartbeat reaper
+    // auto-requeues stalled `running` jobs, applies are idempotent).
+    const useSpot = (process.env['useSpot'] || 'true').toLowerCase() === 'true';
 
     // Ephemeral-only parameters
     const workspaceId = process.env['workspaceId'] || '';
@@ -396,6 +401,39 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
     );
 
     const [instClass, instSize] = instanceType.split('.');
+    const primaryInstanceType = ec2.InstanceType.of(
+      instClass as ec2.InstanceClass,
+      instSize as ec2.InstanceSize,
+    );
+
+    // Spot path uses a MixedInstancesPolicy (requires a Launch Template instead
+    // of inline instance config). Multiple instance types diversify capacity
+    // pools and reduce interruption frequency.
+    const launchTemplate = useSpot
+      ? new ec2.LaunchTemplate(this, 'ExecutorLT', {
+          machineImage: ec2.MachineImage.latestAmazonLinux2023(),
+          instanceType: primaryInstanceType,
+          securityGroup: sg,
+          role,
+          userData,
+          blockDevices: [
+            {
+              deviceName: '/dev/xvda',
+              volume: ec2.BlockDeviceVolume.ebs(30, {
+                volumeType: ec2.EbsDeviceVolumeType.GP3,
+              }),
+            },
+          ],
+        })
+      : undefined;
+
+    // AMD-equivalent burstable counterpart for diversified Spot capacity. Only
+    // applied when the base instance class is t3 (we can't blindly assume an
+    // alternate exists for arbitrary classes).
+    const altInstanceType =
+      (instClass as string).toLowerCase() === 't3'
+        ? ec2.InstanceType.of(ec2.InstanceClass.T3A, instSize as ec2.InstanceSize)
+        : undefined;
 
     // Auto Scaling Group capacity differs by mode.
     // - always-on: min=max=desired=instanceCount, classic rolling-update.
@@ -404,30 +442,45 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
     const asg = new autoscaling.AutoScalingGroup(this, 'ExecutorASG', {
       autoScalingGroupName: asgName,
       vpc,
-      instanceType: ec2.InstanceType.of(
-        instClass as ec2.InstanceClass,
-        instSize as ec2.InstanceSize,
-      ),
-      machineImage: ec2.MachineImage.latestAmazonLinux2023(),
-      securityGroup: sg,
-      role,
-      userData,
       vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
       minCapacity: isEphemeral ? 0 : instanceCount,
       maxCapacity: isEphemeral ? 1 : instanceCount,
       desiredCapacity: isEphemeral ? 0 : instanceCount,
-      blockDevices: [
-        {
-          deviceName: '/dev/xvda',
-          volume: autoscaling.BlockDeviceVolume.ebs(30, {
-            volumeType: autoscaling.EbsDeviceVolumeType.GP3,
-          }),
-        },
-      ],
       updatePolicy: autoscaling.UpdatePolicy.rollingUpdate({
         maxBatchSize: 1,
         minInstancesInService: isEphemeral ? 0 : Math.max(0, instanceCount - 1),
       }),
+      ...(useSpot
+        ? {
+            mixedInstancesPolicy: {
+              instancesDistribution: {
+                onDemandBaseCapacity: 0,
+                onDemandPercentageAboveBaseCapacity: 0,
+                spotAllocationStrategy:
+                  autoscaling.SpotAllocationStrategy.PRICE_CAPACITY_OPTIMIZED,
+              },
+              launchTemplate: launchTemplate!,
+              launchTemplateOverrides: [
+                { instanceType: primaryInstanceType },
+                ...(altInstanceType ? [{ instanceType: altInstanceType }] : []),
+              ],
+            },
+          }
+        : {
+            instanceType: primaryInstanceType,
+            machineImage: ec2.MachineImage.latestAmazonLinux2023(),
+            securityGroup: sg,
+            role,
+            userData,
+            blockDevices: [
+              {
+                deviceName: '/dev/xvda',
+                volume: autoscaling.BlockDeviceVolume.ebs(30, {
+                  volumeType: autoscaling.EbsDeviceVolumeType.GP3,
+                }),
+              },
+            ],
+          }),
     });
 
     // Outputs (always)
@@ -444,6 +497,11 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'executorLogGroupName', {
       value: logGroup.logGroupName,
       description: 'CloudWatch Log Group receiving executor + UserData + cloud-init logs',
+    });
+
+    new cdk.CfnOutput(this, 'executorPurchaseOption', {
+      value: useSpot ? 'spot' : 'on-demand',
+      description: 'EC2 purchase option for the executor ASG (spot or on-demand)',
     });
 
     if (!isEphemeral) {
