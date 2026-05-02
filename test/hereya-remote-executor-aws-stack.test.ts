@@ -1,0 +1,223 @@
+import * as cdk from 'aws-cdk-lib';
+import { Match, Template } from 'aws-cdk-lib/assertions';
+import { HereyaRemoteExecutorAwsStack } from '../lib/hereya-remote-executor-aws-stack';
+
+function clearEnv(): void {
+  delete process.env.mode;
+  delete process.env.workspaceId;
+  delete process.env.brokerConcurrency;
+  delete process.env.idleTimeoutSeconds;
+  delete process.env.HEREYA_CLOUD_URL;
+  delete process.env.WORKSPACE;
+  delete process.env.EXECUTOR_TOKEN;
+  delete process.env.instanceType;
+  delete process.env.instanceCount;
+  delete process.env.vpcId;
+}
+
+function synthesise(env: Record<string, string>): Template {
+  clearEnv();
+  for (const [k, v] of Object.entries(env)) {
+    process.env[k] = v;
+  }
+
+  const app = new cdk.App({
+    context: {
+      // Pre-seed the VPC lookup so synth doesn't need a live AWS account.
+      'vpc-provider:account=123456789012:filter.isDefault=true:region=us-east-1:returnAsymmetricSubnets=true':
+        {
+          vpcId: 'vpc-12345',
+          vpcCidrBlock: '10.0.0.0/16',
+          ownerAccountId: '123456789012',
+          availabilityZones: [],
+          subnetGroups: [
+            {
+              name: 'Public',
+              type: 'Public',
+              subnets: [
+                {
+                  subnetId: 'subnet-1',
+                  cidr: '10.0.0.0/24',
+                  availabilityZone: 'us-east-1a',
+                  routeTableId: 'rtb-1',
+                },
+                {
+                  subnetId: 'subnet-2',
+                  cidr: '10.0.1.0/24',
+                  availabilityZone: 'us-east-1b',
+                  routeTableId: 'rtb-1',
+                },
+              ],
+            },
+          ],
+        },
+    },
+  });
+  const stack = new HereyaRemoteExecutorAwsStack(app, 'TestStack', {
+    env: { account: '123456789012', region: 'us-east-1' },
+  });
+  return Template.fromStack(stack);
+}
+
+describe('HereyaRemoteExecutorAwsStack — always-on mode (default)', () => {
+  it('synths an ASG with min=max=desired=instanceCount and no Lambda/OIDC/Jti', () => {
+    const t = synthesise({
+      WORKSPACE: 'test',
+      EXECUTOR_TOKEN: 'tkn',
+      instanceCount: '2',
+    });
+
+    t.hasResourceProperties('AWS::AutoScaling::AutoScalingGroup', {
+      MinSize: '2',
+      MaxSize: '2',
+      DesiredCapacity: '2',
+    });
+
+    // No broker resources in always-on mode
+    t.resourceCountIs('AWS::Lambda::Function', 0);
+    t.resourceCountIs('AWS::DynamoDB::Table', 0);
+    t.resourceCountIs('Custom::AWSCDKOpenIdConnectProvider', 0);
+  });
+
+  it('emits only the always-on outputs', () => {
+    const t = synthesise({ WORKSPACE: 'test', EXECUTOR_TOKEN: 'tkn' });
+    t.hasOutput('executorAsgName', {});
+    t.hasOutput('executorSecurityGroupId', {});
+    expect(() => t.hasOutput('brokerWebhookUrl', {})).toThrow();
+    expect(() => t.hasOutput('invokerRoleArn', {})).toThrow();
+  });
+});
+
+describe('HereyaRemoteExecutorAwsStack — ephemeral mode', () => {
+  it('synths an ASG at min=0/max=1/desired=0', () => {
+    const t = synthesise({
+      mode: 'ephemeral',
+      WORKSPACE: 'test',
+      workspaceId: 'ws-1',
+      EXECUTOR_TOKEN: 'tkn',
+      HEREYA_CLOUD_URL: 'https://cloud.hereya.dev',
+    });
+    t.hasResourceProperties('AWS::AutoScaling::AutoScalingGroup', {
+      MinSize: '0',
+      MaxSize: '1',
+      DesiredCapacity: '0',
+    });
+  });
+
+  it('provisions the broker Lambda with reserved concurrency + Function URL (AWS_IAM)', () => {
+    const t = synthesise({
+      mode: 'ephemeral',
+      WORKSPACE: 'test',
+      workspaceId: 'ws-1',
+      brokerConcurrency: '7',
+      EXECUTOR_TOKEN: 'tkn',
+      HEREYA_CLOUD_URL: 'https://cloud.hereya.dev',
+    });
+
+    t.hasResourceProperties('AWS::Lambda::Function', {
+      Runtime: 'nodejs22.x',
+      Timeout: 25,
+      MemorySize: 512,
+      ReservedConcurrentExecutions: 7,
+      Environment: {
+        Variables: Match.objectLike({
+          HEREYA_CLOUD_URL: 'https://cloud.hereya.dev',
+          WORKSPACE_ID: 'ws-1',
+          WORKSPACE_NAME: 'test',
+          EXPECTED_BROKER_AUD: 'broker:ws-1',
+        }),
+      },
+    });
+    t.hasResourceProperties('AWS::Lambda::Url', { AuthType: 'AWS_IAM' });
+  });
+
+  it('provisions the BrokerJtiCache table with TTL', () => {
+    const t = synthesise({
+      mode: 'ephemeral',
+      WORKSPACE: 'test',
+      workspaceId: 'ws-1',
+      EXECUTOR_TOKEN: 'tkn',
+      HEREYA_CLOUD_URL: 'https://cloud.hereya.dev',
+    });
+    t.resourceCountIs('AWS::DynamoDB::Table', 1);
+    t.hasResourceProperties('AWS::DynamoDB::Table', {
+      KeySchema: [{ AttributeName: 'jti', KeyType: 'HASH' }],
+      TimeToLiveSpecification: { AttributeName: 'expiresAt', Enabled: true },
+    });
+  });
+
+  it('provisions an OIDC identity provider for hereya-cloud', () => {
+    const t = synthesise({
+      mode: 'ephemeral',
+      WORKSPACE: 'test',
+      workspaceId: 'ws-1',
+      EXECUTOR_TOKEN: 'tkn',
+      HEREYA_CLOUD_URL: 'https://cloud.hereya.dev',
+    });
+    t.hasResourceProperties(
+      'Custom::AWSCDKOpenIdConnectProvider',
+      Match.objectLike({
+        ClientIDList: ['sts.amazonaws.com'],
+        Url: 'https://cloud.hereya.dev',
+      }),
+    );
+  });
+
+  it('provisions the invoker role with sub/aud trust conditions', () => {
+    const t = synthesise({
+      mode: 'ephemeral',
+      WORKSPACE: 'test',
+      workspaceId: 'ws-1',
+      EXECUTOR_TOKEN: 'tkn',
+      HEREYA_CLOUD_URL: 'https://cloud.hereya.dev',
+    });
+    t.hasResourceProperties(
+      'AWS::IAM::Role',
+      Match.objectLike({
+        RoleName: 'HereyaBrokerInvoker-ws-1',
+        AssumeRolePolicyDocument: Match.objectLike({
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Action: 'sts:AssumeRoleWithWebIdentity',
+              Condition: Match.objectLike({
+                StringEquals: Match.objectLike({
+                  'cloud.hereya.dev:sub': 'workspace:ws-1',
+                  'cloud.hereya.dev:aud': 'sts.amazonaws.com',
+                }),
+              }),
+            }),
+          ]),
+        }),
+      }),
+    );
+  });
+
+  it('emits all the install-time outputs', () => {
+    const t = synthesise({
+      mode: 'ephemeral',
+      WORKSPACE: 'test',
+      workspaceId: 'ws-1',
+      EXECUTOR_TOKEN: 'tkn',
+      HEREYA_CLOUD_URL: 'https://cloud.hereya.dev',
+    });
+    t.hasOutput('executorAsgName', {});
+    t.hasOutput('executorSecurityGroupId', {});
+    t.hasOutput('brokerWebhookUrl', {});
+    t.hasOutput('brokerVersion', {});
+    t.hasOutput('awsAccountId', {});
+    t.hasOutput('region', {});
+    t.hasOutput('invokerRoleArn', {});
+    t.hasOutput('brokerLambdaArn', {});
+  });
+
+  it('throws when workspaceId is missing in ephemeral mode', () => {
+    expect(() =>
+      synthesise({
+        mode: 'ephemeral',
+        WORKSPACE: 'test',
+        EXECUTOR_TOKEN: 'tkn',
+        HEREYA_CLOUD_URL: 'https://cloud.hereya.dev',
+      }),
+    ).toThrow(/workspaceId is required/);
+  });
+});

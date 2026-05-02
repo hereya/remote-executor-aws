@@ -1,6 +1,23 @@
 name: hereya/remote-executor-aws
-version: 0.5.3
-description: "Deploy a remote executor on AWS EC2 for a hereya workspace"
+version: 0.6.0
+description: "Deploy a remote executor on AWS EC2 for a hereya workspace (always-on or ephemeral scale-to-zero)"
 visibility: public
 iac: cdk
 infra: aws
+
+parameters:
+  mode:
+    description: "Executor mode: 'always-on' (default — ASG min=max=desired=instanceCount) or 'ephemeral' (ASG min=0/max=1/desired=0 with broker Lambda for on-demand wake)."
+    mandatory: false
+    default: "always-on"
+  workspaceId:
+    description: "Hereya workspace ID. Required when mode=ephemeral; used in OIDC trust policy and broker tags."
+    mandatory: false
+  brokerConcurrency:
+    description: "Reserved Lambda concurrency for the broker. Default 50. Only used when mode=ephemeral."
+    mandatory: false
+    default: "50"
+  idleTimeoutSeconds:
+    description: "Executor idle-shutdown timeout in seconds. Default 600. Only used when mode=ephemeral."
+    mandatory: false
+    default: "600"

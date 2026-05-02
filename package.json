@@ -1,21 +1,34 @@
 {
   "name": "hereya-remote-executor-aws",
-  "version": "0.1.1",
+  "version": "0.6.0",
   "bin": {
     "hereya-remote-executor-aws": "bin/hereya-remote-executor-aws.js"
   },
   "scripts": {
     "build": "tsc",
+    "test": "jest",
     "cdk": "cdk"
   },
   "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "@types/jest": "^30",
     "@types/node": "22.7.9",
     "aws-cdk": "2.176.0",
+    "esbuild": "^0.24.0",
+    "jest": "^30",
+    "ts-jest": "^29",
     "ts-node": "^10.9.2",
     "typescript": "~5.6.3"
   },
   "dependencies": {
+    "@aws-sdk/client-auto-scaling": "^3.700.0",
+    "@aws-sdk/client-dynamodb": "^3.700.0",
+    "@aws-sdk/client-secrets-manager": "^3.700.0",
+    "@aws-sdk/client-ssm": "^3.700.0",
+    "@aws-sdk/lib-dynamodb": "^3.700.0",
     "aws-cdk-lib": "2.176.0",
-    "constructs": "^10.0.0"
+    "constructs": "^10.0.0",
+    "hereya-cli": "*",
+    "jose": "^5.9.6"
   }
 }
