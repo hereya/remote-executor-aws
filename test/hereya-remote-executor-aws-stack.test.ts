@@ -115,7 +115,9 @@ describe('HereyaRemoteExecutorAwsStack — always-on mode (default)', () => {
     t.hasOutput('executorAsgName', {});
     t.hasOutput('executorSecurityGroupId', {});
     t.hasOutput('executorLogGroupName', {});
-    t.hasOutput('executorPurchaseOption', { Value: 'spot' });
+    // Default is on-demand (Spot has no built-in capacity-failure fallback;
+    // opt in per workspace with --parameter useSpot=true).
+    t.hasOutput('executorPurchaseOption', { Value: 'on-demand' });
     expect(() => t.hasOutput('brokerWebhookUrl', {})).toThrow();
     expect(() => t.hasOutput('invokerRoleArn', {})).toThrow();
   });
@@ -270,7 +272,8 @@ describe('HereyaRemoteExecutorAwsStack — ephemeral mode', () => {
     t.hasOutput('executorAsgName', {});
     t.hasOutput('executorSecurityGroupId', {});
     t.hasOutput('executorLogGroupName', {});
-    t.hasOutput('executorPurchaseOption', { Value: 'spot' });
+    // Default purchase option is on-demand (Spot is opt-in via useSpot=true).
+    t.hasOutput('executorPurchaseOption', { Value: 'on-demand' });
     t.hasOutput('brokerWebhookUrl', {});
     t.hasOutput('brokerVersion', {});
     t.hasOutput('awsAccountId', {});
@@ -350,9 +353,23 @@ describe('HereyaRemoteExecutorAwsStack — ephemeral mode', () => {
   });
 });
 
-describe('HereyaRemoteExecutorAwsStack — Spot purchase mode (default)', () => {
-  it('synth with default params produces ASG with MixedInstancesPolicy (price-capacity-optimized, 0% on-demand)', () => {
+describe('HereyaRemoteExecutorAwsStack — purchase mode (on-demand default, Spot opt-in)', () => {
+  it('synth with default params uses on-demand (LaunchConfiguration, no MixedInstancesPolicy)', () => {
     const t = synthesise({ WORKSPACE: 'test', EXECUTOR_TOKEN: 'tkn' });
+
+    t.resourceCountIs('AWS::AutoScaling::LaunchConfiguration', 1);
+    t.resourceCountIs('AWS::EC2::LaunchTemplate', 0);
+
+    const asgs = t.findResources('AWS::AutoScaling::AutoScalingGroup');
+    const asgKeys = Object.keys(asgs);
+    expect(asgKeys.length).toBe(1);
+    expect(asgs[asgKeys[0]].Properties.MixedInstancesPolicy).toBeUndefined();
+
+    t.hasOutput('executorPurchaseOption', { Value: 'on-demand' });
+  });
+
+  it('synth with useSpot=true produces ASG with MixedInstancesPolicy (price-capacity-optimized, 0% on-demand)', () => {
+    const t = synthesise({ WORKSPACE: 'test', EXECUTOR_TOKEN: 'tkn', useSpot: 'true' });
 
     t.hasResourceProperties('AWS::AutoScaling::AutoScalingGroup', {
       MixedInstancesPolicy: Match.objectLike({
@@ -376,7 +393,7 @@ describe('HereyaRemoteExecutorAwsStack — Spot purchase mode (default)', () => 
   });
 
   it('Spot ASG includes a t3a alternate when base instance class is t3', () => {
-    const t = synthesise({ WORKSPACE: 'test', EXECUTOR_TOKEN: 'tkn' });
+    const t = synthesise({ WORKSPACE: 'test', EXECUTOR_TOKEN: 'tkn', useSpot: 'true' });
     t.hasResourceProperties('AWS::AutoScaling::AutoScalingGroup', {
       MixedInstancesPolicy: Match.objectLike({
         LaunchTemplate: Match.objectLike({
@@ -389,30 +406,12 @@ describe('HereyaRemoteExecutorAwsStack — Spot purchase mode (default)', () => 
     });
   });
 
-  it('synth with useSpot=false falls back to on-demand (LaunchConfiguration, no MixedInstancesPolicy)', () => {
-    const t = synthesise({
-      WORKSPACE: 'test',
-      EXECUTOR_TOKEN: 'tkn',
-      useSpot: 'false',
-    });
-
-    t.resourceCountIs('AWS::AutoScaling::LaunchConfiguration', 1);
-    t.resourceCountIs('AWS::EC2::LaunchTemplate', 0);
-
-    // Assert MixedInstancesPolicy is absent.
-    const asgs = t.findResources('AWS::AutoScaling::AutoScalingGroup');
-    const asgKeys = Object.keys(asgs);
-    expect(asgKeys.length).toBe(1);
-    expect(asgs[asgKeys[0]].Properties.MixedInstancesPolicy).toBeUndefined();
-
-    t.hasOutput('executorPurchaseOption', { Value: 'on-demand' });
-  });
-
   it('Spot mode works with ephemeral too (MixedInstancesPolicy + min=0/max=1/desired=0)', () => {
     const t = synthesise({
       mode: 'ephemeral',
       WORKSPACE: 'test',
       workspaceId: 'ws-1',
+      useSpot: 'true',
       EXECUTOR_TOKEN: 'tkn',
       HEREYA_CLOUD_URL: 'https://cloud.hereya.dev',
     });

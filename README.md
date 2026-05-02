@@ -19,25 +19,30 @@ Deploy a remote executor on AWS EC2 for a hereya workspace. Two operating modes:
 | `workspaceId` | yes if `mode=ephemeral` | — | Workspace ID. Used in the OIDC trust-policy `sub` condition and the invoker role name. |
 | `brokerConcurrency` | no | `50` | Reserved Lambda concurrency for the broker (ephemeral only). |
 | `idleTimeoutSeconds` | no | `600` | Executor idle-shutdown timeout in seconds (ephemeral only). |
-| `useSpot` | no | `true` | Use Spot instances for the executor ASG (~70% cheaper). See "Spot vs On-Demand" below. |
+| `useSpot` | no | `false` | Opt in to Spot instances for ~70% savings. See "Spot vs On-Demand" below. |
 
 ## Spot vs On-Demand
 
-By default the executor ASG runs on Spot instances (~70% cheaper). AWS may
-reclaim a Spot EC2 with 2 minutes' notice; interrupted jobs auto-retry
-via hereya-cloud's heartbeat reaper (terraform/CDK state lives in S3+DynamoDB,
-applies are idempotent, so the next executor resumes cleanly).
+The executor defaults to **on-demand**. The executor model itself tolerates
+Spot interruption (terraform/CDK state in S3+DynamoDB, the heartbeat reaper
+auto-requeues stalled `running` jobs, applies are idempotent), BUT ASG
+`MixedInstancesPolicy` has no built-in fallback to on-demand when Spot
+**capacity is unavailable** — a launch failure leaves the ASG retrying
+with backoff and the job queued indefinitely. Defaulting to on-demand
+keeps wakes deterministic.
 
-When `useSpot=true` (the default), the ASG uses a `MixedInstancesPolicy` with
+To opt in to Spot per workspace (~70% cheaper, occasional capacity-driven
+delays acceptable):
+
+```
+hereya workspace executor install -w <ws> --parameter useSpot=true
+```
+
+When `useSpot=true`, the ASG uses a `MixedInstancesPolicy` with
 `onDemandPercentageAboveBaseCapacity=0`, `SpotAllocationStrategy=PRICE_CAPACITY_OPTIMIZED`,
 and a small set of equivalent instance types (e.g. `t3.medium` + `t3a.medium`)
-to diversify Spot capacity pools and reduce interruption frequency.
-
-To opt out (use on-demand):
-
-```
-hereya workspace executor install -w <ws> --parameter useSpot=false
-```
+to diversify Spot capacity pools and reduce both interruption and capacity
+unavailability.
 
 The `executorPurchaseOption` CFN output (`spot` or `on-demand`) reports the
 deployed mode.

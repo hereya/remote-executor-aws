@@ -13,7 +13,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 
-const BROKER_VERSION = '0.7.6';
+const BROKER_VERSION = '0.7.7';
 
 export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -40,10 +40,14 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
 
     const isEphemeral = mode === 'ephemeral';
 
-    // Spot vs on-demand. Default true: the executor model is interruption-
-    // tolerant (terraform/CDK state lives in S3+DynamoDB, the heartbeat reaper
-    // auto-requeues stalled `running` jobs, applies are idempotent).
-    const useSpot = (process.env['useSpot'] || 'true').toLowerCase() === 'true';
+    // Spot vs on-demand. Default false: the executor model itself tolerates
+    // interruption (terraform/CDK state in S3+DynamoDB, heartbeat reaper
+    // requeues stalled `running` jobs), BUT ASG MixedInstancesPolicy has no
+    // built-in fallback to on-demand when Spot capacity is unavailable —
+    // a launch failure leaves the ASG retrying with backoff and the job
+    // queued indefinitely. Opt in per workspace via --parameter useSpot=true
+    // where occasional capacity-driven delays are acceptable.
+    const useSpot = (process.env['useSpot'] || 'false').toLowerCase() === 'true';
 
     // Ephemeral-only parameters
     const workspaceId = process.env['workspaceId'] || '';
