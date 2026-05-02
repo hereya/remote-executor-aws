@@ -9,7 +9,7 @@ import * as nodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 
-const BROKER_VERSION = '0.6.0';
+const BROKER_VERSION = '0.6.1';
 
 export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -96,9 +96,17 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
     // ephemeral so a clean idle exit (rc=0) doesn't get auto-restarted —
     // ExecStopPost then drains the ASG to 0.
     const restartLine = isEphemeral ? 'Restart=no' : 'Restart=always';
+    // Ephemeral drain: ExecStopPost runs on every stop (including clean rc=0
+    // idle exit). OnFailure= triggers the drain unit on non-zero exits where
+    // ExecStopPost may not run reliably. Both invoke the same drain script,
+    // which does an atomic terminate-and-decrement (idempotent vs concurrent
+    // SetDesiredCapacity(1) from the broker) and falls back to `shutdown -h`
+    // so the OS halts even if the AWS API call fails.
     const execStopPost = isEphemeral
-      ? 'ExecStopPost=/usr/bin/aws autoscaling set-desired-capacity --auto-scaling-group-name $ASG_NAME --desired-capacity 0 --region $EC2_REGION\n'
+      ? 'ExecStopPost=/usr/local/bin/hereya-drain-asg.sh\n'
       : '';
+    const onFailureLine = isEphemeral ? 'OnFailure=hereya-drain.service\n' : '';
+    const timeoutStopLine = isEphemeral ? 'TimeoutStopSec=120\n' : '';
 
     userData.addCommands(
       'set -ex',
@@ -141,6 +149,7 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       'Description=Hereya Remote Executor',
       'After=network-online.target',
       'Wants=network-online.target',
+      ...(onFailureLine ? [onFailureLine.trimEnd()] : []),
       '',
       '[Service]',
       'Type=simple',
@@ -160,6 +169,7 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       restartLine,
       'RestartSec=10',
       'TimeoutStopSec=3600',
+      ...(timeoutStopLine ? [timeoutStopLine.trimEnd()] : []),
       'StandardOutput=journal',
       'StandardError=journal',
       'SyslogIdentifier=hereya-executor',
@@ -170,6 +180,49 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
 
       // Restrict service file permissions (contains token)
       'chmod 600 /etc/systemd/system/hereya-executor.service',
+
+      // Ephemeral mode: drain script + drain unit (OnFailure target).
+      // Both are written unconditionally inside the ephemeral branch only —
+      // see the conditional below.
+      ...(isEphemeral
+        ? [
+            // Drain script: terminate-and-decrement is atomic; even if a
+            // concurrent SetDesiredCapacity(1) from the broker races us,
+            // this instance still dies (a fresh one will launch for the new
+            // wake). `set +e` so individual failures don't bypass shutdown.
+            "cat > /usr/local/bin/hereya-drain-asg.sh << 'DRAINEOF'",
+            '#!/bin/bash',
+            'set +e',
+            'logger -t hereya-drain "drain start"',
+            'TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")',
+            'INSTANCE_ID=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)',
+            'REGION=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region)',
+            'logger -t hereya-drain "instance=$INSTANCE_ID region=$REGION"',
+            '/usr/bin/aws autoscaling terminate-instance-in-auto-scaling-group \\',
+            '  --instance-id "$INSTANCE_ID" \\',
+            '  --should-decrement-desired-capacity \\',
+            '  --region "$REGION" 2>&1 | logger -t hereya-drain',
+            'logger -t hereya-drain "terminate-instance-in-auto-scaling-group rc=$?"',
+            '# Belt-and-braces: halt the OS even if the AWS API call failed.',
+            '# ASG will eventually mark this instance unhealthy and replace it.',
+            'logger -t hereya-drain "scheduling shutdown -h now in 5s"',
+            'sleep 5',
+            '/sbin/shutdown -h now',
+            'DRAINEOF',
+            'chmod +x /usr/local/bin/hereya-drain-asg.sh',
+
+            // Drain unit: oneshot target for OnFailure=. Runs the same script
+            // so non-zero ExecStart exits also drain reliably.
+            'cat > /etc/systemd/system/hereya-drain.service << DRAINSVCEOF',
+            '[Unit]',
+            'Description=Hereya Drain ASG (terminate-and-decrement + shutdown fallback)',
+            '',
+            '[Service]',
+            'Type=oneshot',
+            'ExecStart=/usr/local/bin/hereya-drain-asg.sh',
+            'DRAINSVCEOF',
+          ]
+        : []),
 
       // Daily cleanup of stale Terraform provider caches and temp files
       "cat > /etc/cron.daily/hereya-cleanup << 'CLEANUPEOF'",

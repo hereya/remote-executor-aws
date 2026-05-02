@@ -15,6 +15,24 @@ function clearEnv(): void {
   delete process.env.vpcId;
 }
 
+// Render the ASG LaunchConfiguration's UserData (Fn::Base64-wrapped Fn::Join)
+// into a single inspectable string. Any Ref/Fn within the join gets replaced
+// with a sentinel so substring assertions still work.
+function getUserDataString(template: Template): string {
+  const lcs = template.findResources('AWS::AutoScaling::LaunchConfiguration');
+  const lcKeys = Object.keys(lcs);
+  if (lcKeys.length !== 1) {
+    throw new Error(`expected exactly 1 LaunchConfiguration, got ${lcKeys.length}`);
+  }
+  const ud = lcs[lcKeys[0]].Properties.UserData;
+  // UserData is { 'Fn::Base64': { 'Fn::Join': ['', [...parts]] } } or
+  // { 'Fn::Base64': '<plain string>' }.
+  const inner = ud['Fn::Base64'];
+  if (typeof inner === 'string') return inner;
+  const parts: unknown[] = inner['Fn::Join'][1];
+  return parts.map((p) => (typeof p === 'string' ? p : '<<TOKEN>>')).join('');
+}
+
 function synthesise(env: Record<string, string>): Template {
   clearEnv();
   for (const [k, v] of Object.entries(env)) {
@@ -85,6 +103,15 @@ describe('HereyaRemoteExecutorAwsStack — always-on mode (default)', () => {
     t.hasOutput('executorSecurityGroupId', {});
     expect(() => t.hasOutput('brokerWebhookUrl', {})).toThrow();
     expect(() => t.hasOutput('invokerRoleArn', {})).toThrow();
+  });
+
+  it('UserData contains NO drain plumbing (drain is ephemeral-only)', () => {
+    const t = synthesise({ WORKSPACE: 'test', EXECUTOR_TOKEN: 'tkn' });
+    const ud = getUserDataString(t);
+    expect(ud).not.toContain('hereya-drain-asg.sh');
+    expect(ud).not.toContain('OnFailure=hereya-drain.service');
+    expect(ud).not.toContain('terminate-instance-in-auto-scaling-group');
+    expect(ud).not.toContain('--should-decrement-desired-capacity');
   });
 });
 
@@ -219,5 +246,20 @@ describe('HereyaRemoteExecutorAwsStack — ephemeral mode', () => {
         HEREYA_CLOUD_URL: 'https://cloud.hereya.dev',
       }),
     ).toThrow(/workspaceId is required/);
+  });
+
+  it('UserData wires the drain script + OnFailure unit + atomic terminate-and-decrement', () => {
+    const t = synthesise({
+      mode: 'ephemeral',
+      WORKSPACE: 'test',
+      workspaceId: 'ws-1',
+      EXECUTOR_TOKEN: 'tkn',
+      HEREYA_CLOUD_URL: 'https://cloud.hereya.dev',
+    });
+    const ud = getUserDataString(t);
+    expect(ud).toContain('hereya-drain-asg.sh');
+    expect(ud).toContain('OnFailure=hereya-drain.service');
+    expect(ud).toContain('terminate-instance-in-auto-scaling-group');
+    expect(ud).toContain('--should-decrement-desired-capacity');
   });
 });
