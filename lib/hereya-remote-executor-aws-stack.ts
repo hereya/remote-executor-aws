@@ -13,7 +13,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 
-const BROKER_VERSION = '0.7.3';
+const BROKER_VERSION = '0.7.4';
 
 export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -104,7 +104,7 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
 
     // Ephemeral-mode systemd extras
     const ephemeralStartArgs = isEphemeral
-      ? ` --idle-timeout=${idleTimeoutSeconds} --concurrency=20`
+      ? ` --idleTimeout=${idleTimeoutSeconds} --concurrency=20`
       : '';
     const ephemeralAsgEnv = isEphemeral
       ? `Environment=ASG_NAME=${asgName}\n`
