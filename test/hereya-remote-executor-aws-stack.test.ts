@@ -97,10 +97,11 @@ describe('HereyaRemoteExecutorAwsStack — always-on mode (default)', () => {
     t.resourceCountIs('Custom::AWSCDKOpenIdConnectProvider', 0);
   });
 
-  it('emits only the always-on outputs', () => {
+  it('emits the always-on outputs (incl. executorLogGroupName)', () => {
     const t = synthesise({ WORKSPACE: 'test', EXECUTOR_TOKEN: 'tkn' });
     t.hasOutput('executorAsgName', {});
     t.hasOutput('executorSecurityGroupId', {});
+    t.hasOutput('executorLogGroupName', {});
     expect(() => t.hasOutput('brokerWebhookUrl', {})).toThrow();
     expect(() => t.hasOutput('invokerRoleArn', {})).toThrow();
   });
@@ -112,6 +113,42 @@ describe('HereyaRemoteExecutorAwsStack — always-on mode (default)', () => {
     expect(ud).not.toContain('OnFailure=hereya-drain.service');
     expect(ud).not.toContain('terminate-instance-in-auto-scaling-group');
     expect(ud).not.toContain('--should-decrement-desired-capacity');
+  });
+
+  it('provisions a CloudWatch Log Group with 7-day retention', () => {
+    const t = synthesise({ WORKSPACE: 'test', EXECUTOR_TOKEN: 'tkn' });
+    t.resourceCountIs('AWS::Logs::LogGroup', 1);
+    t.hasResourceProperties('AWS::Logs::LogGroup', {
+      RetentionInDays: 7,
+    });
+  });
+
+  it('UserData installs the CloudWatch agent and switches the systemd unit to file logging', () => {
+    const t = synthesise({ WORKSPACE: 'test', EXECUTOR_TOKEN: 'tkn' });
+    const ud = getUserDataString(t);
+    expect(ud).toContain('amazon-cloudwatch-agent');
+    expect(ud).toContain('StandardOutput=append:/var/log/hereya-executor.log');
+    expect(ud).toContain('StandardError=append:/var/log/hereya-executor.log');
+  });
+
+  it('attaches CloudWatchAgentServerPolicy to the executor instance role', () => {
+    const t = synthesise({ WORKSPACE: 'test', EXECUTOR_TOKEN: 'tkn' });
+    t.hasResourceProperties('AWS::IAM::Role', {
+      AssumeRolePolicyDocument: Match.objectLike({
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Principal: { Service: 'ec2.amazonaws.com' },
+          }),
+        ]),
+      }),
+      ManagedPolicyArns: Match.arrayWith([
+        Match.objectLike({
+          'Fn::Join': Match.arrayWith([
+            Match.arrayWith([Match.stringLikeRegexp('CloudWatchAgentServerPolicy')]),
+          ]),
+        }),
+      ]),
+    });
   });
 });
 
@@ -218,6 +255,7 @@ describe('HereyaRemoteExecutorAwsStack — ephemeral mode', () => {
     });
     t.hasOutput('executorAsgName', {});
     t.hasOutput('executorSecurityGroupId', {});
+    t.hasOutput('executorLogGroupName', {});
     t.hasOutput('brokerWebhookUrl', {});
     t.hasOutput('brokerVersion', {});
     t.hasOutput('awsAccountId', {});
@@ -225,6 +263,49 @@ describe('HereyaRemoteExecutorAwsStack — ephemeral mode', () => {
     t.hasOutput('brokerLambdaArn', {});
     // invokerRoleArn intentionally absent — see "does NOT provision OIDC ..."
     expect(() => t.hasOutput('invokerRoleArn', {})).toThrow();
+  });
+
+  it('provisions a CloudWatch Log Group + CloudWatch agent in UserData (ephemeral too)', () => {
+    const t = synthesise({
+      mode: 'ephemeral',
+      WORKSPACE: 'test',
+      workspaceId: 'ws-1',
+      EXECUTOR_TOKEN: 'tkn',
+      HEREYA_CLOUD_URL: 'https://cloud.hereya.dev',
+    });
+    t.resourceCountIs('AWS::Logs::LogGroup', 1);
+    t.hasResourceProperties('AWS::Logs::LogGroup', { RetentionInDays: 7 });
+
+    const ud = getUserDataString(t);
+    expect(ud).toContain('amazon-cloudwatch-agent');
+    expect(ud).toContain('StandardOutput=append:/var/log/hereya-executor.log');
+    expect(ud).toContain('StandardError=append:/var/log/hereya-executor.log');
+  });
+
+  it('attaches CloudWatchAgentServerPolicy to the executor instance role (ephemeral)', () => {
+    const t = synthesise({
+      mode: 'ephemeral',
+      WORKSPACE: 'test',
+      workspaceId: 'ws-1',
+      EXECUTOR_TOKEN: 'tkn',
+      HEREYA_CLOUD_URL: 'https://cloud.hereya.dev',
+    });
+    t.hasResourceProperties('AWS::IAM::Role', {
+      AssumeRolePolicyDocument: Match.objectLike({
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Principal: { Service: 'ec2.amazonaws.com' },
+          }),
+        ]),
+      }),
+      ManagedPolicyArns: Match.arrayWith([
+        Match.objectLike({
+          'Fn::Join': Match.arrayWith([
+            Match.arrayWith([Match.stringLikeRegexp('CloudWatchAgentServerPolicy')]),
+          ]),
+        }),
+      ]),
+    });
   });
 
   it('throws when workspaceId is missing in ephemeral mode', () => {

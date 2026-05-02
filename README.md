@@ -48,6 +48,18 @@ The install command POSTs these to hereya-cloud's `/api/workspaces/:name/executo
 | `executorAsgName` | `hereya-executor-<workspace>-<stack>` |
 | `executorSecurityGroupId` | `sg-...` |
 
+## Logging
+
+Executor logs forward to CloudWatch Logs at `/hereya/executor/<workspace>-<stackname>` with 7-day retention. Streams (one set per EC2 instance):
+
+| Stream | Source |
+|---|---|
+| `<instanceId>/executor` | `/var/log/hereya-executor.log` (systemd-managed `hereya-executor.service` stdout/stderr, appended on disk) |
+| `<instanceId>/userdata` | `/var/log/hereya-userdata.log` (UserData bootstrap output) |
+| `<instanceId>/cloud-init` | `/var/log/cloud-init-output.log` (cloud-init / boot stages) |
+
+Forwarding is done by the AWS CloudWatch agent installed during UserData. Because the executor's own stdout/stderr is `append:`ed to a regular file (not journald), the logs survive even if the instance terminates before the agent flushes — and survive a CloudWatch agent crash too. The log group name is exposed as the `executorLogGroupName` CFN output.
+
 ## Development
 
 ```bash

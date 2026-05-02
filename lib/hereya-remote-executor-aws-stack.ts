@@ -9,10 +9,11 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as nodejs from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 
-const BROKER_VERSION = '0.7.1';
+const BROKER_VERSION = '0.7.2';
 
 export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -63,12 +64,25 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
     // IAM role with AdministratorAccess (executor provisions arbitrary infrastructure).
     // AdministratorAccess covers `autoscaling:SetDesiredCapacity` used by the
     // ephemeral systemd ExecStopPost — no extra grant needed.
+    // CloudWatchAgentServerPolicy is also attached for clarity / best-practice
+    // even though AdministratorAccess already covers CloudWatch Logs writes.
     const role = new iam.Role(this, 'ExecutorRole', {
       assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
       managedPolicies: [
         iam.ManagedPolicy.fromAwsManagedPolicyName('AdministratorAccess'),
         iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore'),
+        iam.ManagedPolicy.fromAwsManagedPolicyName('CloudWatchAgentServerPolicy'),
       ],
+    });
+
+    // CloudWatch Log Group for durable executor logs. Created in BOTH modes
+    // — even an always-on instance can crash and lose its journald history.
+    // Per-instance streams are written by the CloudWatch agent installed in
+    // UserData (see below).
+    const logGroup = new logs.LogGroup(this, 'ExecutorLogs', {
+      logGroupName: `/hereya/executor/${workspace}-${this.stackName}`,
+      retention: logs.RetentionDays.ONE_WEEK,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
     // Store executor token in Secrets Manager (works the same in both modes —
@@ -120,6 +134,60 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       // Install Node.js 22 via NodeSource
       'curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -',
       'dnf install -y nodejs git cronie',
+
+      // Install CloudWatch agent for durable log forwarding (so we have
+      // visibility even when the instance terminates — journald dies with
+      // the host).
+      'dnf install -y amazon-cloudwatch-agent',
+
+      // CDK Token for the log group name needs to be assigned to a shell
+      // variable first; embedding the Token directly inside a heredoc is not
+      // reliable.
+      `LOG_GROUP_NAME='${logGroup.logGroupName}'`,
+
+      // Write the agent config: tail the executor log file, the UserData log,
+      // and cloud-init output. The unquoted heredoc terminator (CWAEOF, no
+      // single-quotes) allows ${LOG_GROUP_NAME} to be expanded by the shell.
+      'cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << CWAEOF',
+      '{',
+      '  "logs": {',
+      '    "logs_collected": {',
+      '      "files": {',
+      '        "collect_list": [',
+      '          {',
+      '            "file_path": "/var/log/hereya-executor.log",',
+      '            "log_group_name": "${LOG_GROUP_NAME}",',
+      '            "log_stream_name": "{instance_id}/executor",',
+      '            "timezone": "UTC"',
+      '          },',
+      '          {',
+      '            "file_path": "/var/log/hereya-userdata.log",',
+      '            "log_group_name": "${LOG_GROUP_NAME}",',
+      '            "log_stream_name": "{instance_id}/userdata",',
+      '            "timezone": "UTC"',
+      '          },',
+      '          {',
+      '            "file_path": "/var/log/cloud-init-output.log",',
+      '            "log_group_name": "${LOG_GROUP_NAME}",',
+      '            "log_stream_name": "{instance_id}/cloud-init",',
+      '            "timezone": "UTC"',
+      '          }',
+      '        ]',
+      '      }',
+      '    }',
+      '  }',
+      '}',
+      'CWAEOF',
+
+      // Pre-create the executor log file so the agent has something to tail
+      // from boot (the systemd unit will append to it).
+      'touch /var/log/hereya-executor.log',
+      'chown ec2-user:ec2-user /var/log/hereya-executor.log',
+
+      // Start the CloudWatch agent.
+      '/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \\',
+      '  -a fetch-config -m ec2 -s \\',
+      '  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json',
 
       // Install OpenTofu
       'curl -fsSL https://get.opentofu.org/install-opentofu.sh -o /tmp/install-opentofu.sh',
@@ -173,8 +241,11 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       'RestartSec=10',
       'TimeoutStopSec=3600',
       ...(timeoutStopLine ? [timeoutStopLine.trimEnd()] : []),
-      'StandardOutput=journal',
-      'StandardError=journal',
+      // Append (not journal) so executor stdout/stderr is durable on disk;
+      // journald dies with the host on ephemeral terminate. The CloudWatch
+      // agent (above) tails this file into CloudWatch Logs.
+      'StandardOutput=append:/var/log/hereya-executor.log',
+      'StandardError=append:/var/log/hereya-executor.log',
       'SyslogIdentifier=hereya-executor',
       '',
       '[Install]',
@@ -351,6 +422,11 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'executorSecurityGroupId', {
       value: sg.securityGroupId,
       description: 'Security group ID of the remote executor',
+    });
+
+    new cdk.CfnOutput(this, 'executorLogGroupName', {
+      value: logGroup.logGroupName,
+      description: 'CloudWatch Log Group receiving executor + UserData + cloud-init logs',
     });
 
     if (!isEphemeral) {
