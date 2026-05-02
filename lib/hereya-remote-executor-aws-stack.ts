@@ -9,7 +9,7 @@ import * as nodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 
-const BROKER_VERSION = '0.6.1';
+const BROKER_VERSION = '0.6.2';
 
 export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -388,6 +388,10 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
         minify: true,
         sourceMap: true,
         target: 'node22',
+        // hereya-cli is published as ESM-only. The Lambda bundle MUST be ESM
+        // too, otherwise `import 'hereya-cli'` is transpiled to `require()` and
+        // crashes at runtime with ERR_REQUIRE_ESM.
+        format: nodejs.OutputFormat.ESM,
         // The AWS-provided runtime ships @aws-sdk/* — externalize to keep the
         // bundle small and avoid pinning an older SDK version.
         externalModules: [
@@ -399,7 +403,7 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
           'hereya-cli',
         ],
         // hereya-cli is installed-into-bundle (NodejsFunction `npm install`s it
-        // alongside the bundle so the runtime can require it).
+        // alongside the bundle so the runtime can `import` it as ESM).
         nodeModules: ['hereya-cli'],
       },
       environment: {
