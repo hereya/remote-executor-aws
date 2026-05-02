@@ -131,7 +131,7 @@ describe('HereyaRemoteExecutorAwsStack — ephemeral mode', () => {
     });
   });
 
-  it('provisions the broker Lambda with reserved concurrency + Function URL (NONE auth)', () => {
+  it('provisions the broker Lambda with reserved concurrency, behind an HTTP API + Lambda authorizer (no Function URL)', () => {
     const t = synthesise({
       mode: 'ephemeral',
       WORKSPACE: 'test',
@@ -155,8 +155,23 @@ describe('HereyaRemoteExecutorAwsStack — ephemeral mode', () => {
         }),
       },
     });
-    // AuthType=NONE — auth is the KMS-signed JWT verified inside the handler.
-    t.hasResourceProperties('AWS::Lambda::Url', { AuthType: 'NONE' });
+
+    // Two Lambdas: broker + authorizer.
+    t.resourceCountIs('AWS::Lambda::Function', 2);
+    // No Function URL — replaced by API Gateway HTTP API.
+    t.resourceCountIs('AWS::Lambda::Url', 0);
+
+    // API Gateway HTTP API + REQUEST authorizer + CUSTOM-auth route.
+    t.resourceCountIs('AWS::ApiGatewayV2::Api', 1);
+    t.hasResourceProperties('AWS::ApiGatewayV2::Authorizer', {
+      AuthorizerType: 'REQUEST',
+      IdentitySource: ['$request.header.X-Hereya-Broker-Token'],
+      AuthorizerResultTtlInSeconds: 0,
+    });
+    t.hasResourceProperties('AWS::ApiGatewayV2::Route', {
+      AuthorizationType: 'CUSTOM',
+      RouteKey: 'POST /',
+    });
   });
 
   it('provisions the BrokerJtiCache table with TTL', () => {

@@ -8,8 +8,8 @@ import {
   PutCommand,
 } from "@aws-sdk/lib-dynamodb";
 import type {
-  LambdaFunctionURLEvent,
-  LambdaFunctionURLResult,
+  APIGatewayProxyEventV2,
+  APIGatewayProxyStructuredResultV2,
 } from "aws-lambda";
 
 import { resolveEnvForJob } from "./resolve-env-adapter";
@@ -30,8 +30,8 @@ interface BrokerWebhookBody {
 }
 
 export async function handler(
-  event: LambdaFunctionURLEvent
-): Promise<LambdaFunctionURLResult> {
+  event: APIGatewayProxyEventV2
+): Promise<APIGatewayProxyStructuredResultV2> {
   let jobIdForFailure: string | undefined;
   let tokenForFailure: string | undefined;
   try {
@@ -94,7 +94,7 @@ async function handleResolveEnv(input: {
   jobId: string;
   body: BrokerWebhookBody;
   token: string;
-}): Promise<LambdaFunctionURLResult> {
+}): Promise<APIGatewayProxyStructuredResultV2> {
   // hereya-cloud must inline the resolve-env payload in the webhook body —
   // the Lambda has no workspace token to call back and fetch it.
   if (!input.body.payload) {
@@ -119,7 +119,7 @@ async function handleResolveEnv(input: {
   }
 }
 
-async function handleHeavyweight(): Promise<LambdaFunctionURLResult> {
+async function handleHeavyweight(): Promise<APIGatewayProxyStructuredResultV2> {
   // Idempotent — concurrent webhooks all succeed; ASG launches at most one
   // instance because MaxSize=1. The long-lived EXECUTOR_TOKEN is already
   // baked into the ASG launch template via Secrets Manager (see CDK stack),
@@ -147,7 +147,7 @@ function requireEnv(name: string): string {
   return v;
 }
 
-function readRawBody(event: LambdaFunctionURLEvent): string {
+function readRawBody(event: APIGatewayProxyEventV2): string {
   if (!event.body) return "";
   if (event.isBase64Encoded) {
     return Buffer.from(event.body, "base64").toString("utf8");
@@ -156,9 +156,9 @@ function readRawBody(event: LambdaFunctionURLEvent): string {
   return event.body;
 }
 
-function readBrokerToken(event: LambdaFunctionURLEvent): string | undefined {
+function readBrokerToken(event: APIGatewayProxyEventV2): string | undefined {
   const headers = event.headers ?? {};
-  // Lambda Function URL events lower-case header keys.
+  // API Gateway HTTP API v2 events lower-case header keys.
   return (
     headers["x-hereya-broker-token"] ??
     headers["X-Hereya-Broker-Token"] ??
@@ -169,7 +169,7 @@ function readBrokerToken(event: LambdaFunctionURLEvent): string | undefined {
 function jsonResponse(
   statusCode: number,
   body: unknown
-): LambdaFunctionURLResult {
+): APIGatewayProxyStructuredResultV2 {
   return {
     statusCode,
     headers: { "Content-Type": "application/json" },

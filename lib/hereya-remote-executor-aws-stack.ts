@@ -1,5 +1,8 @@
 import * as path from 'path';
 import * as cdk from 'aws-cdk-lib';
+import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
+import * as apigwv2Authorizers from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
+import * as apigwv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
@@ -9,7 +12,7 @@ import * as nodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 
-const BROKER_VERSION = '0.6.5';
+const BROKER_VERSION = '0.7.0';
 
 export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -359,16 +362,18 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
     // Ephemeral mode additions: jti table + broker Lambda
     // -----------------------------------------------------------------
     //
-    // Originally this branch also provisioned an OIDC identity provider and
-    // an IAM role (HereyaBrokerInvoker-<workspaceId>) so hereya-cloud could
-    // SigV4-sign requests via AssumeRoleWithWebIdentity, with the Function URL
-    // gated by AuthType=AWS_IAM. In practice AWS rejected those signed
-    // requests with 403 even when the resource policy explicitly allowed the
-    // role ARN. The cause was never pinned down (long debug session). The
-    // KMS-signed JWT in `X-Hereya-Broker-Token` is the real authentication —
-    // it's RS256-signed by hereya-cloud's KMS key, body-bound (`bh` claim),
-    // jti-deduped, and 60s-expiring. Reverted to AuthType=NONE so the Lambda
-    // sees and verifies the JWT.
+    // Originally this branch provisioned a Lambda Function URL (first with
+    // AWS_IAM auth gated by an OIDC identity provider + HereyaBrokerInvoker
+    // role, later with AuthType=NONE). Both arrangements ran into Function
+    // URL auth weirdness in this AWS account: AWS_IAM rejected
+    // properly-signed assumed-role sessions with 403, and AuthType=NONE
+    // somehow returned 403 for unauthenticated requests too. Switched to an
+    // API Gateway HTTP API + custom Lambda authorizer (below) — the
+    // KMS-signed JWT in `X-Hereya-Broker-Token` is still the real
+    // authentication (RS256, body-bound via `bh` claim, jti-deduped,
+    // 60s-expiring), now verified by the authorizer Lambda before the broker
+    // Lambda is invoked. The broker re-verifies signature/exp/aud (cheap
+    // with cached JWKS) plus the body hash and jti for defense in depth.
 
     // DynamoDB jti replay cache — TTL on `expiresAt`.
     const jtiCacheTable = new dynamodb.Table(this, 'BrokerJtiCache', {
@@ -459,16 +464,64 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
 
     jtiCacheTable.grantReadWriteData(brokerLambda);
 
-    // Function URL with AuthType=NONE — the URL is unguessable AND the Lambda
-    // verifies a KMS-signed JWT in `X-Hereya-Broker-Token` before doing any
-    // work. Reserved concurrency + JWT verification + jti dedup limit DoS
-    // exposure if the URL leaks.
-    const fnUrl = brokerLambda.addFunctionUrl({
-      authType: lambda.FunctionUrlAuthType.NONE,
+    // Lambda authorizer — verifies the X-Hereya-Broker-Token JWT BEFORE the
+    // broker Lambda is invoked. Uses the same JWKS verification helpers as the
+    // broker handler. No DynamoDB lookups (jti dedup happens later in the
+    // broker), so the authorizer is ~ms.
+    const authorizerLambda = new nodejs.NodejsFunction(this, 'BrokerAuthorizerLambda', {
+      runtime: lambda.Runtime.NODEJS_22_X,
+      entry: path.join(__dirname, '..', 'lambda', 'authorizer.ts'),
+      handler: 'handler',
+      memorySize: 256,
+      timeout: cdk.Duration.seconds(10),
+      bundling: {
+        minify: true,
+        sourceMap: true,
+        target: 'node22',
+        format: nodejs.OutputFormat.ESM,
+        externalModules: [
+          '@aws-sdk/client-auto-scaling',
+          '@aws-sdk/client-dynamodb',
+          '@aws-sdk/client-secrets-manager',
+          '@aws-sdk/client-ssm',
+          '@aws-sdk/lib-dynamodb',
+        ],
+      },
+      environment: {
+        HEREYA_CLOUD_URL: hereyaCloudUrl,
+        EXPECTED_BROKER_AUD: expectedAud,
+      },
+    });
+
+    const brokerAuthorizer = new apigwv2Authorizers.HttpLambdaAuthorizer(
+      'BrokerAuthorizer',
+      authorizerLambda,
+      {
+        responseTypes: [apigwv2Authorizers.HttpLambdaResponseType.SIMPLE],
+        identitySource: ['$request.header.X-Hereya-Broker-Token'],
+        // Each broker JWT is single-use (jti dedup in the broker). Disable
+        // authorizer caching so every request gets verified.
+        resultsCacheTtl: cdk.Duration.seconds(0),
+      },
+    );
+
+    const httpApi = new apigwv2.HttpApi(this, 'BrokerHttpApi', {
+      description: `Hereya broker for workspace ${workspace}`,
+      corsPreflight: undefined,
+    });
+
+    httpApi.addRoutes({
+      path: '/',
+      methods: [apigwv2.HttpMethod.POST],
+      integration: new apigwv2Integrations.HttpLambdaIntegration(
+        'BrokerLambdaIntegration',
+        brokerLambda,
+      ),
+      authorizer: brokerAuthorizer,
     });
 
     // Ephemeral-mode CFN outputs
-    new cdk.CfnOutput(this, 'brokerWebhookUrl', { value: fnUrl.url });
+    new cdk.CfnOutput(this, 'brokerWebhookUrl', { value: httpApi.apiEndpoint });
     new cdk.CfnOutput(this, 'brokerVersion', { value: BROKER_VERSION });
     new cdk.CfnOutput(this, 'awsAccountId', { value: cdk.Aws.ACCOUNT_ID });
     new cdk.CfnOutput(this, 'region', { value: cdk.Aws.REGION });
