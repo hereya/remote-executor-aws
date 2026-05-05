@@ -1,6 +1,6 @@
 {
   "name": "hereya-remote-executor-aws",
-  "version": "0.7.8",
+  "version": "0.7.9",
   "bin": {
     "hereya-remote-executor-aws": "bin/hereya-remote-executor-aws.js"
   },
@@ -28,7 +28,7 @@
     "@aws-sdk/lib-dynamodb": "^3.700.0",
     "aws-cdk-lib": "2.176.0",
     "constructs": "^10.0.0",
-    "hereya-cli": "^0.92.1",
+    "hereya-cli": "^0.96.0",
     "jose": "^5.9.6"
   }
 }

@@ -5,15 +5,10 @@ import {
   resolveEnvValues,
   getInfrastructure,
   InfrastructureType,
+  mintInstallationToken,
   type ResolveEnvValuesInput,
   type ResolveEnvValuesOutput,
 } from "hereya-cli";
-// `mintInstallationToken` lives at `hereya-cli/lib/github-app.ts`. It's also
-// re-exported from `hereya-cli`'s public index in 0.95.5+, but
-// `remote-executor-aws` currently pins `hereya-cli@^0.92.1`, so we deep-import
-// the compiled module for backwards compatibility. Once the bump lands,
-// switch to the named import alongside the others above.
-import { mintInstallationToken } from "hereya-cli/dist/lib/github-app.js";
 
 let registered = false;
 
