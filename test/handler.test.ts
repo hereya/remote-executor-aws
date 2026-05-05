@@ -47,6 +47,10 @@ jest.mock("../lambda/verify-jwt", () => ({
 }));
 
 import { handler } from "../lambda/handler";
+import {
+  setMintInstallationTokenStub,
+  resetMintInstallationTokenStub,
+} from "./stubs/hereya-cli-github-app";
 import type { LambdaFunctionURLEvent } from "aws-lambda";
 
 function makeEvent(opts: {
@@ -89,6 +93,7 @@ function makeEvent(opts: {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  resetMintInstallationTokenStub();
 });
 
 describe("broker handler — resolve-env happy path", () => {
@@ -241,5 +246,158 @@ describe("broker handler — resolve-env without payload", () => {
       makeEvent({ body: { jobId: "j", jobType: "resolve-env" } })
     );
     expect((res as { statusCode: number }).statusCode).toBe(400);
+  });
+});
+
+describe("broker handler — resolve-env with github-app marker", () => {
+  it("mints an installation token, replaces the github-app: marker, and PATCHes completed", async () => {
+    mockVerify.mockResolvedValue({
+      jti: "jti-gh-1",
+      exp: Math.floor(Date.now() / 1000) + 60,
+      jobId: "job-gh-1",
+      jobType: "resolve-env",
+    });
+    mockDdbSend.mockResolvedValue({});
+
+    setMintInstallationTokenStub(async (input) => {
+      expect(input.appId).toBe("12345");
+      expect(input.installationId).toBe("67890");
+      expect(input.privateKey).toBe("PEM_FAKE");
+      return "ghs_FAKE_INSTALLATION_TOKEN";
+    });
+
+    // First fetch: GET github-app-config
+    // Second fetch: PATCH job completed
+    mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (
+        String(url).includes("/github-app-config") &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return new Response(
+          JSON.stringify({
+            appId: "12345",
+            installationId: "67890",
+            privateKey: "PEM_FAKE",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      // PATCH job completed
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const event = makeEvent({
+      body: {
+        jobId: "job-gh-1",
+        jobType: "resolve-env",
+        payload: {
+          env: {
+            hereyaGitPassword: "github-app:67890",
+            hereyaGitUsername: "x-access-token",
+            hereyaGitRemoteUrl: "https://github.com/foo/bar.git",
+          },
+          project: "foo/bar",
+          workspace: "default",
+        },
+      },
+    });
+
+    const res = await handler(event);
+    expect((res as { statusCode: number }).statusCode).toBe(200);
+
+    // Confirm the github-app-config endpoint was called with the broker token
+    const cfgCall = mockFetch.mock.calls.find((c) =>
+      String(c[0]).includes("/github-app-config")
+    );
+    expect(cfgCall).toBeDefined();
+    expect(String(cfgCall![0])).toBe(
+      "https://cloud.hereya.test/api/executor/jobs/job-gh-1/github-app-config"
+    );
+    expect((cfgCall![1] as RequestInit).headers).toMatchObject({
+      "X-Hereya-Broker-Token": "tkn",
+    });
+
+    // Confirm the PATCH (completed) carried the resolved env with the minted token
+    const patchCall = mockFetch.mock.calls.find(
+      (c) =>
+        String(c[0]).includes("/api/executor/jobs/job-gh-1") &&
+        !String(c[0]).includes("/github-app-config")
+    );
+    expect(patchCall).toBeDefined();
+    const patchedBody = JSON.parse(
+      (patchCall![1] as RequestInit).body as string
+    );
+    expect(patchedBody.status).toBe("completed");
+    expect(patchedBody.result.env.hereyaGitPassword).toBe(
+      "ghs_FAKE_INSTALLATION_TOKEN"
+    );
+    // The marker should be GONE — never `github-app:67890`
+    expect(patchedBody.result.env.hereyaGitPassword).not.toBe(
+      "github-app:67890"
+    );
+    // Other fields untouched
+    expect(patchedBody.result.env.hereyaGitUsername).toBe("x-access-token");
+    expect(patchedBody.result.env.hereyaGitRemoteUrl).toBe(
+      "https://github.com/foo/bar.git"
+    );
+  });
+
+  it("leaves the github-app: marker unresolved (still PATCHes completed) when the cloud endpoint returns 401", async () => {
+    mockVerify.mockResolvedValue({
+      jti: "jti-gh-2",
+      exp: Math.floor(Date.now() / 1000) + 60,
+      jobId: "job-gh-2",
+      jobType: "resolve-env",
+    });
+    mockDdbSend.mockResolvedValue({});
+
+    let mintCalled = false;
+    setMintInstallationTokenStub(async () => {
+      mintCalled = true;
+      return "should_not_be_called";
+    });
+
+    mockFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes("/github-app-config")) {
+        return new Response(JSON.stringify({ error: "unauthorized" }), {
+          status: 401,
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const event = makeEvent({
+      body: {
+        jobId: "job-gh-2",
+        jobType: "resolve-env",
+        payload: {
+          env: {
+            hereyaGitPassword: "github-app:67890",
+            hereyaGitUsername: "x-access-token",
+          },
+          project: "foo/bar",
+          workspace: "default",
+        },
+      },
+    });
+
+    const res = await handler(event);
+    // Resolver doesn't throw — it just leaves the marker in place.
+    expect((res as { statusCode: number }).statusCode).toBe(200);
+    expect(mintCalled).toBe(false);
+
+    const patchCall = mockFetch.mock.calls.find(
+      (c) =>
+        String(c[0]).includes("/api/executor/jobs/job-gh-2") &&
+        !String(c[0]).includes("/github-app-config")
+    );
+    expect(patchCall).toBeDefined();
+    const patchedBody = JSON.parse(
+      (patchCall![1] as RequestInit).body as string
+    );
+    // Status is still completed — the resolver returns success with markers
+    // left in place, mirroring CLI behaviour.
+    expect(patchedBody.status).toBe("completed");
+    expect(patchedBody.result.env.hereyaGitPassword).toBe("github-app:67890");
   });
 });

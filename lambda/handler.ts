@@ -109,7 +109,12 @@ async function handleResolveEnv(input: {
   }
 
   try {
-    const env = await resolveEnvForJob(input.body.payload);
+    const env = await resolveEnvForJob({
+      payload: input.body.payload,
+      brokerToken: input.token,
+      cloudUrl: HEREYA_CLOUD_URL,
+      jobId: input.jobId,
+    });
     await patchJobCompleted(input.jobId, { env }, input.token);
     return jsonResponse(200, { ok: true });
   } catch (err) {
