@@ -8,11 +8,11 @@ import {
   type ResolveEnvValuesInput,
   type ResolveEnvValuesOutput,
 } from "hereya-cli";
-// `mintInstallationToken` lives in `hereya-cli/lib/github-app.ts`. The published
-// package's `index.ts` doesn't currently re-export the function (only the
-// `MintInstallationTokenFn` *type*), so we deep-import the compiled module.
-// The function shape matches the `MintInstallationTokenFn` injection point on
-// `resolveEnvValues`.
+// `mintInstallationToken` lives at `hereya-cli/lib/github-app.ts`. It's also
+// re-exported from `hereya-cli`'s public index in 0.95.5+, but
+// `remote-executor-aws` currently pins `hereya-cli@^0.92.1`, so we deep-import
+// the compiled module for backwards compatibility. Once the bump lands,
+// switch to the named import alongside the others above.
 import { mintInstallationToken } from "hereya-cli/dist/lib/github-app.js";
 
 let registered = false;

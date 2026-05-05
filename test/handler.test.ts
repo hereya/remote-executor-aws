@@ -50,7 +50,7 @@ import { handler } from "../lambda/handler";
 import {
   setMintInstallationTokenStub,
   resetMintInstallationTokenStub,
-} from "./stubs/hereya-cli-github-app";
+} from "./stubs/hereya-cli";
 import type { LambdaFunctionURLEvent } from "aws-lambda";
 
 function makeEvent(opts: {

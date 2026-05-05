@@ -129,3 +129,51 @@ export async function resolveEnvValues(
 export async function resolveGithubAppMarkers<T>(resolved: T): Promise<T> {
   return resolved;
 }
+
+// ---------------------------------------------------------------------------
+// mintInstallationToken stub
+// ---------------------------------------------------------------------------
+//
+// The real implementation calls `@octokit/auth-app`; tests override the
+// function via `setMintInstallationTokenStub` to return a fake token. State
+// is held on `globalThis` so the module instance the adapter pulls in (via
+// jest's `moduleNameMapper` rewrite of `hereya-cli`) and the module instance
+// the test imports directly share the same backing stub — Jest may otherwise
+// resolve them as separate instances depending on path keys.
+
+export type MintInstallationTokenInput = {
+  appId: string;
+  installationId: string;
+  privateKey: string;
+};
+
+type MintStubFn = (input: MintInstallationTokenInput) => Promise<string>;
+
+const MINT_STUB_KEY = "__hereyaMintInstallationTokenStub";
+
+const defaultMintStub: MintStubFn = async () => {
+  throw new Error(
+    "mintInstallationToken stub not configured — call setMintInstallationTokenStub() in your test"
+  );
+};
+
+function getMintStub(): MintStubFn {
+  return (
+    ((globalThis as Record<string, unknown>)[MINT_STUB_KEY] as MintStubFn) ??
+    defaultMintStub
+  );
+}
+
+export function setMintInstallationTokenStub(fn: MintStubFn): void {
+  (globalThis as Record<string, unknown>)[MINT_STUB_KEY] = fn;
+}
+
+export function resetMintInstallationTokenStub(): void {
+  delete (globalThis as Record<string, unknown>)[MINT_STUB_KEY];
+}
+
+export async function mintInstallationToken(
+  input: MintInstallationTokenInput
+): Promise<string> {
+  return getMintStub()(input);
+}

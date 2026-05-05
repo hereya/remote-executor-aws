@@ -12,6 +12,6 @@ module.exports = {
   moduleFileExtensions: ['ts', 'tsx', 'js', 'mjs', 'cjs', 'jsx', 'json', 'node'],
   moduleNameMapper: {
     '^hereya-cli$': '<rootDir>/test/stubs/hereya-cli.ts',
-    '^hereya-cli/dist/lib/github-app\\.js$': '<rootDir>/test/stubs/hereya-cli-github-app.ts',
+    '^hereya-cli/dist/lib/github-app\\.js$': '<rootDir>/test/stubs/hereya-cli.ts',
   },
 };
