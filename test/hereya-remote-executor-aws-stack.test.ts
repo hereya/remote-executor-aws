@@ -351,6 +351,20 @@ describe('HereyaRemoteExecutorAwsStack — ephemeral mode', () => {
     expect(ud).toContain('terminate-instance-in-auto-scaling-group');
     expect(ud).toContain('--should-decrement-desired-capacity');
   });
+
+  it('UserData defers hereya-cli auto-update restart while a job is running', () => {
+    const t = synthesise({
+      mode: 'ephemeral',
+      WORKSPACE: 'test',
+      workspaceId: 'ws-1',
+      EXECUTOR_TOKEN: 'tkn',
+      HEREYA_CLOUD_URL: 'https://cloud.hereya.dev',
+    });
+    const ud = getUserDataString(t);
+    expect(ud).toContain('cgroup.procs');
+    expect(ud).toContain('PROC_COUNT');
+    expect(ud).toContain('deferring restart');
+  });
 });
 
 describe('HereyaRemoteExecutorAwsStack — purchase mode (on-demand default, Spot opt-in)', () => {
