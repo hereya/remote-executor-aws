@@ -122,13 +122,29 @@ describe('HereyaRemoteExecutorAwsStack — always-on mode (default)', () => {
     expect(() => t.hasOutput('invokerRoleArn', {})).toThrow();
   });
 
-  it('UserData contains NO drain plumbing (drain is ephemeral-only)', () => {
+  it('UserData contains NO idle-drain plumbing (idle-drain is ephemeral-only)', () => {
     const t = synthesise({ WORKSPACE: 'test', EXECUTOR_TOKEN: 'tkn' });
     const ud = getUserDataString(t);
     expect(ud).not.toContain('hereya-drain-asg.sh');
     expect(ud).not.toContain('OnFailure=hereya-drain.service');
-    expect(ud).not.toContain('terminate-instance-in-auto-scaling-group');
+    // The idle-drain terminate-AND-decrement is ephemeral-only...
     expect(ud).not.toContain('--should-decrement-desired-capacity');
+    // ...but the boot-failure self-terminate (WITHOUT decrement, so the ASG
+    // launches a replacement instead of leaving a zombie) applies to both modes.
+    expect(ud).toContain('--no-should-decrement-desired-capacity');
+  });
+
+  it('UserData retries network installs and self-terminates a failed provision', () => {
+    const t = synthesise({ WORKSPACE: 'test', EXECUTOR_TOKEN: 'tkn' });
+    const ud = getUserDataString(t);
+    // Transient DNS/mirror blips must not brick the boot.
+    expect(ud).toContain('retry()');
+    expect(ud).toContain('retry dnf install -y nodejs git cronie');
+    expect(ud).toContain('retry npm install -g hereya-cli');
+    // A genuinely-failed provision self-terminates for ASG replacement.
+    expect(ud).toContain('hereya_provision_failed');
+    expect(ud).toContain('--no-should-decrement-desired-capacity');
+    expect(ud).toContain("trap 'rc=$?");
   });
 
   it('provisions a CloudWatch Log Group with 7-day retention', () => {

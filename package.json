@@ -1,6 +1,6 @@
 {
   "name": "hereya-remote-executor-aws",
-  "version": "0.7.10",
+  "version": "0.7.11",
   "bin": {
     "hereya-remote-executor-aws": "bin/hereya-remote-executor-aws.js"
   },

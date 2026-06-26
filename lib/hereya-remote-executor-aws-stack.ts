@@ -140,14 +140,46 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       // Log all output for debugging
       'exec > >(tee /var/log/hereya-userdata.log) 2>&1',
 
+      // --- Provisioning resilience ------------------------------------------
+      // A transient DNS/mirror blip at boot must NOT permanently brick the
+      // host. Without this, a single failed `dnf`/`curl`/`npm` aborts the whole
+      // script under `set -e`, the executor systemd unit is never created, and
+      // (ephemeral mode) the instance becomes a zombie holding desired=1 that
+      // nothing ever drains — the idle-drain plumbing lives in the executor
+      // unit's ExecStopPost/OnFailure, which never fired because the unit never
+      // started. retry() rides out transient failures; the EXIT trap
+      // self-terminates a genuinely-failed provision so the ASG replaces it
+      // (terminate WITHOUT decrement → a fresh instance launches, both modes).
+      'retry() {',
+      '  local n=0 max=5 delay=5',
+      '  until "$@"; do',
+      '    n=$((n+1))',
+      '    if [ "$n" -ge "$max" ]; then echo "retry: giving up after $max attempts: $*" >&2; return 1; fi',
+      '    echo "retry: attempt $n/$max failed: $* (sleep ${delay}s)" >&2; sleep "$delay"; delay=$((delay*2))',
+      '  done',
+      '}',
+      'hereya_provision_failed() {',
+      '  local rc=$1 tok iid reg',
+      '  logger -t hereya-provision "userdata FAILED rc=$rc - self-terminating for ASG replacement"',
+      '  tok=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")',
+      '  iid=$(curl -sS -H "X-aws-ec2-metadata-token: $tok" http://169.254.169.254/latest/meta-data/instance-id)',
+      '  reg=$(curl -sS -H "X-aws-ec2-metadata-token: $tok" http://169.254.169.254/latest/meta-data/placement/region)',
+      '  # Terminate WITHOUT decrement so the ASG launches a replacement (correct',
+      '  # in both always-on and ephemeral). Fall back to marking the instance',
+      '  # unhealthy so the ASG still reaps it if the terminate call itself fails.',
+      '  aws autoscaling terminate-instance-in-auto-scaling-group --instance-id "$iid" --no-should-decrement-desired-capacity --region "$reg" 2>&1 | logger -t hereya-provision \\',
+      '    || aws autoscaling set-instance-health --instance-id "$iid" --health-status Unhealthy --region "$reg" 2>&1 | logger -t hereya-provision',
+      '}',
+      "trap 'rc=$?; if [ \"$rc\" -ne 0 ]; then hereya_provision_failed \"$rc\"; fi' EXIT",
+
       // Install Node.js 22 via NodeSource
-      'curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -',
-      'dnf install -y nodejs git cronie',
+      'retry bash -c "curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -"',
+      'retry dnf install -y nodejs git cronie',
 
       // Install CloudWatch agent for durable log forwarding (so we have
       // visibility even when the instance terminates — journald dies with
       // the host).
-      'dnf install -y amazon-cloudwatch-agent',
+      'retry dnf install -y amazon-cloudwatch-agent',
 
       // CDK Token for the log group name needs to be assigned to a shell
       // variable first; embedding the Token directly inside a heredoc is not
@@ -210,16 +242,16 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       '  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json',
 
       // Install OpenTofu
-      'curl -fsSL https://get.opentofu.org/install-opentofu.sh -o /tmp/install-opentofu.sh',
+      'retry curl -fsSL https://get.opentofu.org/install-opentofu.sh -o /tmp/install-opentofu.sh',
       'chmod +x /tmp/install-opentofu.sh',
-      '/tmp/install-opentofu.sh --install-method rpm',
+      'retry /tmp/install-opentofu.sh --install-method rpm',
       'rm -f /tmp/install-opentofu.sh',
 
       // Install AWS CDK globally
-      'npm install -g aws-cdk',
+      'retry npm install -g aws-cdk',
 
       // Install hereya-cli globally
-      'npm install -g hereya-cli',
+      'retry npm install -g hereya-cli',
 
       // Verify all installations
       'node --version',
@@ -232,7 +264,7 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       'EC2_REGION=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/placement/region)',
 
       // Read executor token from Secrets Manager
-      `EXECUTOR_TOKEN=$(aws secretsmanager get-secret-value --secret-id "${tokenSecret.secretName}" --region $EC2_REGION --query 'SecretString' --output text)`,
+      `EXECUTOR_TOKEN=$(retry aws secretsmanager get-secret-value --secret-id "${tokenSecret.secretName}" --region $EC2_REGION --query 'SecretString' --output text)`,
 
       // Create systemd service for hereya executor
       `cat > /etc/systemd/system/hereya-executor.service << SERVICEEOF`,
