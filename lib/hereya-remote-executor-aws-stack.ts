@@ -451,6 +451,13 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       'systemctl start crond',
       'systemctl enable hereya-executor',
       'systemctl start hereya-executor',
+
+      // Disarm the boot-failure EXIT trap once the executor is confirmed up.
+      // Past this point the box is healthy and its lifecycle is owned by the
+      // systemd unit + (ephemeral) idle-drain plumbing; a trailing command
+      // failing must NOT trigger the provision-failed self-terminate and fight
+      // the drain logic.
+      'systemctl is-active --quiet hereya-executor && trap - EXIT',
     );
 
     const [instClass, instSize] = instanceType.split('.');

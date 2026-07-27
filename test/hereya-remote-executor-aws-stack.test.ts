@@ -145,6 +145,9 @@ describe('HereyaRemoteExecutorAwsStack — always-on mode (default)', () => {
     expect(ud).toContain('hereya_provision_failed');
     expect(ud).toContain('--no-should-decrement-desired-capacity');
     expect(ud).toContain("trap 'rc=$?");
+    // ...but once the executor is confirmed up, the boot EXIT trap is disarmed
+    // so a trailing error can never self-terminate an already-healthy box.
+    expect(ud).toContain('systemctl is-active --quiet hereya-executor && trap - EXIT');
   });
 
   it('provisions a CloudWatch Log Group with 7-day retention', () => {
