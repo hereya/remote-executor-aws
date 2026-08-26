@@ -29,6 +29,19 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
     const hereyaCloudUrlRaw = process.env['HEREYA_CLOUD_URL'] || 'https://cloud.hereya.dev';
     const hereyaCloudUrl = hereyaCloudUrlRaw.replace(/\/+$/, '');
     const instanceType = process.env['instanceType'] || 't3.medium';
+    // Swap sizing. The stock 4GB t3.medium has NO swap (zram-generator refuses
+    // above 800MB RAM), so two concurrent IaC deploys (CDK + tofu, each with an
+    // npm install) exhaust RAM into a thrash death-spiral: the kernel never
+    // OOM-kills, every process starves — including node, so the executor's own
+    // per-job timeout never fires — and the whole box goes dark (logs, SSM and
+    // heartbeats all stop) while EC2 status checks stay green and the ASG keeps
+    // it InService. Nothing self-heals; the workspace is wedged until someone
+    // terminates the instance by hand. A swapfile turns that hard brick into
+    // (slow) forward progress. Set swapSizeGb=0 to opt out.
+    const swapSizeGb = parseInt(process.env['swapSizeGb'] || '4', 10);
+    if (Number.isNaN(swapSizeGb) || swapSizeGb < 0) {
+      throw new Error(`Invalid swapSizeGb: ${process.env['swapSizeGb']} (must be a non-negative integer)`);
+    }
     const vpcId: string | undefined = process.env['vpcId'];
     const instanceCount = parseInt(process.env['instanceCount'] || '1', 10);
 
@@ -112,8 +125,19 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
     const userData = ec2.UserData.forLinux();
 
     // Ephemeral-mode systemd extras
+    // Job concurrency (ephemeral mode). Was hardcoded at 20, which is wildly
+    // over-provisioned for a 4GB box running IaC deploys — it only ever took a
+    // handful of jobs at once, but nothing capped the heavy ones. Default 2:
+    // enough to overlap a long deploy with a cheap resolve-env, low enough that
+    // two heavyweight deploys can't co-schedule onto the same instance.
+    const executorConcurrency = parseInt(process.env['executorConcurrency'] || '2', 10);
+    if (Number.isNaN(executorConcurrency) || executorConcurrency < 1) {
+      throw new Error(
+        `Invalid executorConcurrency: ${process.env['executorConcurrency']} (must be a positive integer)`,
+      );
+    }
     const ephemeralStartArgs = isEphemeral
-      ? ` --idleTimeout=${idleTimeoutSeconds} --concurrency=20`
+      ? ` --idleTimeout=${idleTimeoutSeconds} --concurrency=${executorConcurrency}`
       : '';
     const ephemeralAsgEnv = isEphemeral
       ? `Environment=ASG_NAME=${asgName}\n`
@@ -171,6 +195,42 @@ export class HereyaRemoteExecutorAwsStack extends cdk.Stack {
       '    || aws autoscaling set-instance-health --instance-id "$iid" --health-status Unhealthy --region "$reg" 2>&1 | logger -t hereya-provision',
       '}',
       "trap 'rc=$?; if [ \"$rc\" -ne 0 ]; then hereya_provision_failed \"$rc\"; fi' EXIT",
+
+      // --- Swap ---------------------------------------------------------------
+      // Guard on `swapon --show` so re-runs are idempotent and instance types
+      // that already ship swap are left alone. swappiness stays low: this is an
+      // OOM safety net for deploy spikes, not a reason to page out the hot set.
+      ...(swapSizeGb > 0
+        ? [
+            'hereya_setup_swap() {',
+            '  if [ -n "$(swapon --show --noheadings)" ]; then return 0; fi',
+            `  fallocate -l ${swapSizeGb}G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=${swapSizeGb * 1024}`,
+            '  chmod 600 /swapfile',
+            '  mkswap /swapfile',
+            // XFS is the AL2023 root filesystem, and it rejects a fallocate'd
+            // swapfile ("swapon failed: Invalid argument") because the extents
+            // are unwritten. Rewrite it with dd on that failure — slower, but it
+            // is the only form swapon accepts there.
+            '  if ! swapon /swapfile; then',
+            '    rm -f /swapfile',
+            `    dd if=/dev/zero of=/swapfile bs=1M count=${swapSizeGb * 1024}`,
+            '    chmod 600 /swapfile',
+            '    mkswap /swapfile',
+            '    swapon /swapfile',
+            '  fi',
+            "  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab",
+            "  echo 'vm.swappiness=10' > /etc/sysctl.d/99-hereya-swap.conf",
+            '  sysctl -w vm.swappiness=10',
+            '}',
+            // Fail-soft, deliberately. This whole script runs under `set -e` with
+            // an EXIT trap that self-terminates the instance, so letting a failed
+            // mkswap/swapon escape would turn "no swap" into an unbootable host
+            // and an endless ASG relaunch loop — the swapfile exists to PREVENT
+            // bricks, it must never cause one. Invoking it as the left side of
+            // `||` also suppresses errexit inside the function.
+            'hereya_setup_swap || logger -t hereya-swap "swap setup failed - continuing without swap"',
+          ]
+        : []),
 
       // Install Node.js 22 via NodeSource
       'retry bash -c "curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -"',

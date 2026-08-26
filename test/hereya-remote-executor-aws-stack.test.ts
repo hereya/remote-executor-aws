@@ -14,6 +14,8 @@ function clearEnv(): void {
   delete process.env.instanceCount;
   delete process.env.vpcId;
   delete process.env.useSpot;
+  delete process.env.executorConcurrency;
+  delete process.env.swapSizeGb;
 }
 
 // Render the ASG's UserData (Fn::Base64-wrapped Fn::Join) into a single
@@ -383,6 +385,75 @@ describe('HereyaRemoteExecutorAwsStack — ephemeral mode', () => {
     expect(ud).toContain('cgroup.procs');
     expect(ud).toContain('PROC_COUNT');
     expect(ud).toContain('deferring restart');
+  });
+
+  it('caps job concurrency at 2 by default and honours executorConcurrency', () => {
+    const base = {
+      mode: 'ephemeral',
+      WORKSPACE: 'test',
+      workspaceId: 'ws-1',
+      EXECUTOR_TOKEN: 'tkn',
+    };
+    // A 4GB box must not co-schedule two heavyweight IaC deploys: that is what
+    // thrashes it into a dark, un-self-healing brick.
+    expect(getUserDataString(synthesise(base))).toContain('--concurrency=2');
+    expect(getUserDataString(synthesise({ ...base, executorConcurrency: '6' }))).toContain('--concurrency=6');
+  });
+
+  it('rejects a non-positive executorConcurrency', () => {
+    expect(() =>
+      synthesise({
+        mode: 'ephemeral',
+        WORKSPACE: 'test',
+        workspaceId: 'ws-1',
+        EXECUTOR_TOKEN: 'tkn',
+        executorConcurrency: '0',
+      }),
+    ).toThrow(/Invalid executorConcurrency/);
+  });
+});
+
+describe('HereyaRemoteExecutorAwsStack — swap', () => {
+  it('provisions a 4GB swapfile by default, idempotently, with low swappiness', () => {
+    const ud = getUserDataString(synthesise({ WORKSPACE: 'test', EXECUTOR_TOKEN: 'tkn' }));
+    expect(ud).toContain('swapon --show --noheadings');
+    // Swap setup must never abort the `set -e` userdata: that would trip the
+    // boot EXIT trap and self-terminate the host into a relaunch loop.
+    expect(ud).toContain('hereya_setup_swap || logger');
+    expect(ud).toContain('fallocate -l 4G /swapfile');
+    expect(ud).toContain('mkswap /swapfile');
+    // XFS rejects fallocate'd swapfiles, so a dd rewrite must be wired as the
+    // fallback — otherwise swap silently never comes up on AL2023.
+    expect(ud).toContain('if ! swapon /swapfile; then');
+    expect(ud).toContain('dd if=/dev/zero of=/swapfile bs=1M count=4096');
+    // Survives a reboot, and re-running UserData must not append a duplicate.
+    expect(ud).toContain("grep -q '^/swapfile ' /etc/fstab");
+    expect(ud).toContain('vm.swappiness=10');
+  });
+
+  it('applies to ephemeral mode too', () => {
+    const ud = getUserDataString(
+      synthesise({ mode: 'ephemeral', WORKSPACE: 'test', workspaceId: 'ws-1', EXECUTOR_TOKEN: 'tkn' }),
+    );
+    expect(ud).toContain('fallocate -l 4G /swapfile');
+  });
+
+  it('honours swapSizeGb and omits the block entirely at 0', () => {
+    const withSwap = getUserDataString(
+      synthesise({ WORKSPACE: 'test', EXECUTOR_TOKEN: 'tkn', swapSizeGb: '8' }),
+    );
+    expect(withSwap).toContain('fallocate -l 8G /swapfile');
+    expect(withSwap).toContain('count=8192');
+
+    const noSwap = getUserDataString(synthesise({ WORKSPACE: 'test', EXECUTOR_TOKEN: 'tkn', swapSizeGb: '0' }));
+    expect(noSwap).not.toContain('/swapfile');
+    expect(noSwap).not.toContain('hereya_setup_swap');
+  });
+
+  it('rejects a negative swapSizeGb', () => {
+    expect(() => synthesise({ WORKSPACE: 'test', EXECUTOR_TOKEN: 'tkn', swapSizeGb: '-1' })).toThrow(
+      /Invalid swapSizeGb/,
+    );
   });
 });
 
