@@ -133,6 +133,38 @@ describe("broker handler — resolve-env happy path", () => {
   });
 });
 
+describe("broker handler — resolve-env on a job already final", () => {
+  it("answers 200 and does not PATCH failed when the job is no longer updatable", async () => {
+    mockVerify.mockResolvedValue({
+      jti: "jti-final",
+      exp: Math.floor(Date.now() / 1000) + 60,
+      jobId: "job-final",
+      jobType: "resolve-env",
+    });
+    mockDdbSend.mockResolvedValue({});
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: "Job is not in an updatable state (status=completed)" }),
+        { status: 400 }
+      )
+    );
+
+    const res = await handler(
+      makeEvent({
+        body: { jobId: "job-final", jobType: "resolve-env", payload: { env: { PLAIN: "x" } } },
+      })
+    );
+
+    expect((res as { statusCode: number }).statusCode).toBe(200);
+    const patches = mockFetch.mock.calls.filter((c) =>
+      String(c[0]).includes("/api/executor/jobs/job-final")
+    );
+    // Exactly one PATCH (completed) — no follow-up "failed" PATCH.
+    expect(patches).toHaveLength(1);
+    expect(JSON.parse(patches[0]![1].body as string).status).toBe("completed");
+  });
+});
+
 describe("broker handler — heavyweight wake", () => {
   it("calls SetDesiredCapacity(1) exactly once", async () => {
     mockVerify.mockResolvedValue({
