@@ -227,6 +227,14 @@ async function patchJobCompleted(
   );
   if (!resp.ok) {
     const text = await resp.text();
+    // The job already reached a final state (another worker — e.g. the woken
+    // executor polling the same queue — finished it first). Nothing is left to
+    // record: answering 500 here only makes the webhook look failed and
+    // triggers a doomed patchJobFailed. Treat it as an idempotent no-op.
+    if (resp.status === 400 && text.includes("not in an updatable state")) {
+      console.warn("broker.resolve-env.already_final", { jobId, status: resp.status });
+      return;
+    }
     throw new Error(`patch completed failed (${resp.status}): ${text}`);
   }
 }
